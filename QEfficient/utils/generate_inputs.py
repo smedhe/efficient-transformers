@@ -9,6 +9,7 @@ from typing import List
 import numpy as np
 import torch
 
+from QEfficient.transformers.modeling_utils import DYNAMIC_SEQ_LEN_SUPPORTED_MODEL_ARCH
 from QEfficient.utils import (
     get_num_layers_from_config,
     get_padding_shape_from_config,
@@ -194,23 +195,34 @@ class InputHandler:
             padding=True,
         )
         input_ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask")
         batch_size, input_len = input_ids.shape
-        inputs.pop("attention_mask")
         inputs.pop("token_type_ids", None)
         position_ids = np.arange(input_len).reshape(1, -1)
         inputs["input_ids"] = np.concatenate(
             [input_ids, np.full((batch_size, self.prompt_len - input_len), self.tokenizer.pad_token_id)],
             axis=1,
         ).astype(np.int64)
+        if attention_mask is not None:
+            inputs["attention_mask"] = np.concatenate(
+                [attention_mask, np.zeros((batch_size, self.prompt_len - input_len), dtype=attention_mask.dtype)],
+                axis=1,
+            )
         inputs["position_ids"] = np.concatenate(
             [position_ids, np.full((batch_size, self.prompt_len - input_len), -1)],
             axis=1,
         ).astype(np.int64)
 
-        for i in range(self.n_layer):
-            pad_shape = self._get_layer_cache_shape(i)
-            inputs["past_key." + str(i)] = np.zeros((pad_shape), dtype=np.float32)
-            inputs["past_value." + str(i)] = np.zeros((pad_shape), dtype=np.float32)
+        if hasattr(self.config, "model_type") and self.config.model_type in DYNAMIC_SEQ_LEN_SUPPORTED_MODEL_ARCH:
+            for i in range(self.n_layer):
+                cache_shape = self.global_shape if not self.is_chunked_attention[i] else self.sliding_shape
+                inputs["past_key." + str(i)] = np.zeros((cache_shape), dtype=np.float32)
+                inputs["past_value." + str(i)] = np.zeros((cache_shape), dtype=np.float32)
+        else:
+            for i in range(self.n_layer):
+                pad_shape = self._get_layer_cache_shape(i)
+                inputs["past_key." + str(i)] = np.zeros((pad_shape), dtype=np.float32)
+                inputs["past_value." + str(i)] = np.zeros((pad_shape), dtype=np.float32)
         if self.full_batch_size:
             inputs["batch_index"] = np.arange(self.full_batch_size).reshape(-1, 1)
         return inputs
