@@ -241,10 +241,10 @@ class ModelConfig:
         default="AutoModelForCausalLM",
         metadata={"help": "The AutoClass name to load the model (e.g., 'AutoModelForCausalLM')."},
     )
-    load_in_4bit: bool = field(
-        default=False,
-        metadata={"help": "Whether to load the model in 4-bit quantization."},
-    )
+    # load_in_4bit: bool = field(
+    #     default=False,
+    #     metadata={"help": "Whether to load the model in 4-bit quantization."},
+    # )
     use_peft: bool = field(
         default=True,
         metadata={"help": "Whether to use PEFT (Parameter-Efficient Fine-Tuning)."},
@@ -333,10 +333,10 @@ class TrainingConfig:
         default=None,
         metadata={"help": "The log_file output name."},
     )
-    overwrite_output_dir: bool = field(
-        default=False,
-        metadata={"help": "whether it is allowed to reuse and overwrite an existing output_dir."},
-    )
+    # overwrite_output_dir: bool = field(
+    #     default=False,
+    #     metadata={"help": "whether it is allowed to reuse and overwrite an existing output_dir."},
+    # )
     seed: int = field(
         default=42,
         metadata={"help": "Random seed for reproducibility."},

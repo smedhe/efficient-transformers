@@ -62,7 +62,7 @@ def prepare_training_config(
     training_config.setdefault("dataloader_prefetch_factor", dataset_config.get("dataloader_prefetch_factor"))
     training_config.setdefault("dataloader_drop_last", dataset_config.get("dataloader_drop_last"))
     training_config.setdefault("dataloader_num_workers", dataset_config.get("dataloader_num_workers"))
-    training_config.setdefault("group_by_length", dataset_config.get("group_by_length"))
+    # training_config.setdefault("group_by_length", dataset_config.get("group_by_length"))
 
     # Handle DDP configuration
     if training_config.get("ddp_config") is not None:
