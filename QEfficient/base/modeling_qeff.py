@@ -306,7 +306,6 @@ class QEFFBaseModel(ABC):
         """
         # TODO: Hack for retain_full_kv, handle this outside
         export_kwargs.pop("retain_full_kv", None)
-        export_kwargs.pop("mla_absorption", None)
         onnx_path = export_dir / f"{self.model_name}.onnx"
 
         # Return early if ONNX already exists
@@ -481,7 +480,6 @@ class QEFFBaseModel(ABC):
         use_onnx_subfunctions: Optional[bool] = False,
         use_dynamo: Optional[bool] = False,
         retain_full_kv: Optional[bool] = False,
-        mla_absorption: Optional[Dict[str, bool]] = None,
         qaic_config: Optional[dict] = None,
         **compiler_options,
     ):
@@ -490,7 +488,6 @@ class QEFFBaseModel(ABC):
             "use_onnx_subfunctions": use_onnx_subfunctions,
             "use_dynamo": use_dynamo,
             "retain_full_kv": retain_full_kv,
-            "mla_absorption": mla_absorption,
         }
 
         if prefill_only:
@@ -588,7 +585,6 @@ class QEFFBaseModel(ABC):
         offload_pt_weights: Optional[bool] = True,
         enable_chunking: Optional[bool] = False,
         retain_full_kv: Optional[bool] = None,
-        mla_absorption: Optional[Dict[str, bool]] = None,
         qaic_config: Optional[dict] = None,
         specialization_module_name: Optional[str] = None,
         use_dynamo: Optional[bool] = False,
@@ -631,7 +627,6 @@ class QEFFBaseModel(ABC):
                 use_onnx_subfunctions,
                 use_dynamo,
                 retain_full_kv,
-                mla_absorption,
                 num_devices=mdp_ts_num_devices,
                 qaic_config=qaic_config,
                 **compiler_options,
