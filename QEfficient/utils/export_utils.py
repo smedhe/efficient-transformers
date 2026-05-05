@@ -286,6 +286,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
             "use_onnx_subfunctions": getattr(qeff_model, "_use_onnx_subfunctions", False),
             "onnx_transform_version": 1,
             "use_dynamo": all_args.get("use_dynamo", False),
+            "external_data_layout_version": 10,
         }
     )
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
