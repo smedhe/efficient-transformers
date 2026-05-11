@@ -88,6 +88,23 @@ def _is_nightly_pipeline_session(session):
     return False
 
 
+def _is_nightly_pipeline_session(session):
+    """Check if this is a nightly_pipeline test session"""
+    # Check invocation args
+    if hasattr(session.config, "invocation_params"):
+        args_str = " ".join(session.config.invocation_params.args)
+        if "nightly_pipeline" in args_str:
+            return True
+
+    # Check if any collected items are from nightly_pipeline
+    if hasattr(session, "items") and session.items:
+        for item in session.items:
+            if "nightly_pipeline" in item.nodeid:
+                return True
+
+    return False
+
+
 def qeff_models_clean_up(qeff_dir=QEFF_HOME):
     """
     Clean up QEFF models and cache.
