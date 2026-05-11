@@ -71,6 +71,23 @@ os.environ.setdefault("TORCH_CPP_LOG_LEVEL", "ERROR")
 os.environ.setdefault("GLOG_minloglevel", "2")
 
 
+def _is_nightly_pipeline_session(session):
+    """Check if this is a nightly_pipeline test session"""
+    # Check invocation args
+    if hasattr(session.config, "invocation_params"):
+        args_str = " ".join(session.config.invocation_params.args)
+        if "nightly_pipeline" in args_str:
+            return True
+
+    # Check if any collected items are from nightly_pipeline
+    if hasattr(session, "items") and session.items:
+        for item in session.items:
+            if "nightly_pipeline" in item.nodeid:
+                return True
+
+    return False
+
+
 def qeff_models_clean_up(qeff_dir=QEFF_HOME):
     """
     Clean up QEFF models and cache.
@@ -108,7 +125,10 @@ def manual_cleanup():
 
 def pytest_sessionstart(session):
     logger.info("PYTEST Session Starting ...")
-
+    # Skip cleanup for nightly_pipeline tests
+    if _is_nightly_pipeline_session(session):
+        logger.info("Skipping cleanup for nightly_pipeline tests")
+        return
     # Suppress transformers warnings about unused weights when loading models with fewer layers
     hf_logging.set_verbosity_error()
 
@@ -129,6 +149,10 @@ def pytest_configure(config):
 
 def pytest_sessionfinish(session, exitstatus):
     inside_worker = getattr(session.config, "workerinput", None)
+    # Skip cleanup for nightly_pipeline tests
+    if _is_nightly_pipeline_session(session):
+        logger.info("Skipping cleanup for nightly_pipeline tests")
+        return
     if inside_worker is None:
         qeff_models_clean_up()
         logger.info("...PYTEST Session Ended.")
