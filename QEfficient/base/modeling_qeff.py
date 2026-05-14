@@ -14,7 +14,6 @@ import shutil
 import subprocess
 import warnings
 from abc import ABC, abstractmethod
-from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, OrderedDict
 
@@ -42,7 +41,6 @@ from QEfficient.utils import (
     generate_mdp_partition_config,
     hash_dict_params,
     load_json,
-    require_value,
     to_named_specializations,
 )
 from QEfficient.utils.export_utils import export_wrapper
