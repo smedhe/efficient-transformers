@@ -755,6 +755,7 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen2_5_VLDecoderLayer: QEffQwen2_5_VLDecoderLayer,
         Qwen2_5_VisionTransformerPretrainedModel: QEffQwen2_5_VisionTransformerPretrainedModel,
         Qwen2_5_VLVisionAttention: QEffQwen2_5_VLVisionAttention,
+        Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlock,
         Qwen2_5_VLTextModel: QEffQwen2_5_VLTextModel,
         # Starcoder2
         Starcoder2Attention: QEffStarcoder2Attention,
