@@ -177,6 +177,16 @@ class QEffLlamaAttention(LlamaAttention):
                 **kwargs,
             )
         else:
+            key, value, attention_mask, _ = past_key_value_update(
+                module=self,
+                key=key_states,
+                value=value_states,
+                attention_mask=attention_mask,
+                past_key_value=past_key_values,
+                comp_ctx_lengths=comp_ctx_lengths,
+                batch_index=batch_index,
+                position_ids=position_ids,
+            )
             attn_output, attn_weights = eager_attention_forward(
                 self,
                 query_states,
