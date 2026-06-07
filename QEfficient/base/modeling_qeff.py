@@ -14,7 +14,7 @@ import subprocess
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, List, Optional, OrderedDict
+from typing import Dict, List, Optional, OrderedDict, Union
 
 import onnx
 import torch
@@ -839,6 +839,7 @@ class QEFFBaseModel(ABC):
                     specializations,
                     offload_pt_weights,
                     use_onnx_subfunctions,
+                    use_dynamo,
                     retain_full_kv,
                     num_devices=mdp_ts_num_devices,
                     qaic_config=qaic_config,

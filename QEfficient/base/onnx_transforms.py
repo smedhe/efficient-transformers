@@ -224,13 +224,13 @@ class RenameFunctionOutputsTransform(BaseOnnxTransform):
     """Rename outputs of decoder-related functions for better clarity."""
 
     @classmethod
-    def apply(cls, model: ModelProto) -> bool:
+    def apply(cls, model: ModelProto, layer_idx=0) -> bool:
         graph = model.graph
         op_type_to_func = {f.name: f for f in model.functions}
         decoder_patterns = ["DecoderLayer", "Block", "Layer"]
         renamed = False
         model_out_map = {v.name: i for i, v in enumerate(graph.output)}
-        layer_idx = 0
+        # layer_idx = 0
         rename_map = {}
 
         for node in graph.node:

@@ -680,7 +680,7 @@ class CustomOpsTransform(ModuleMappingTransform):
         # BERT-family: replace _create_attention_masks (uses create_bidirectional_mask,
         # which breaks ONNX tracing) with an ONNX-safe _prepare_4d_attention_mask version.
         BertModel: QEffBertModel,
-        RobertaModel: QEffRobertaModel,
+        # RobertaModel: QEffRobertaModel,
         XLMRobertaModel: QEffXLMRobertaModel,
         Qwen3_5RMSNorm: GemmaCustomRMSNormAIC,
         Qwen3_5MoeRMSNorm: GemmaCustomRMSNormAIC,
@@ -927,7 +927,7 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlock,
         Qwen3VLVisionBlock: QEffQwen3VLVisionBlock,
         Qwen3VLMoeVisionBlock: QEffQwen3VLMoeVisionBlock,
-        SiglipEncoderLayer: QEffSiglipEncoderLayer,
+        # SiglipEncoderLayer: QEffSiglipEncoderLayer,
         WhisperEncoderLayer: QEffWhisperEncoderLayerRegion,
     }
 
