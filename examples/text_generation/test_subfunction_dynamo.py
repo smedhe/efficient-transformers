@@ -44,7 +44,7 @@ ort_inputs = runner.input_handler.prepare_ort_inputs()
 ort_tokens = runner.run_kv_model_on_ort(onnx_path)
 print(ort_tokens)
 
-qeff_model.compile(prefill_seq_len=8, ctx_len=32, use_onnx_subfunctions=True)
+qeff_model.compile(prefill_seq_len=8, ctx_len=32, use_onnx_subfunctions=True, use_dynamo=True)
 print("compile done")
 print("QEff Transformed Onnx Model Outputs(AIC Backend)")
 output = qeff_model.generate(prompts=["My name is"], tokenizer=tokenizer, automation=True)
