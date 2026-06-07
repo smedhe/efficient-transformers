@@ -615,6 +615,7 @@ class QEFFBaseModel(ABC):
             )
         elif specializations:
             kwargs["prefill_seq_len"] = get_attr_or_key(specializations[0], ("cl", "seq_len", "sequence_length"))
+            kwargs["ctx_len"] = get_attr_or_key(specializations[0], ("ctx_len", "context_length"))
 
         # Transform before export
         qaic_config = (
@@ -743,17 +744,23 @@ class QEFFBaseModel(ABC):
             "_InternalRetainedState" if export_kwargs.get("use_onnx_subfunctions", False) else "_RetainedState"
         )
         for layer_idx in range(idx, end_idx):
-            layer_states = _resolve_pkv_layers(example_inputs.get("past_key_values"))
-            if layer_states is None:
-                output_name.append(f"past_key.{layer_idx}{retained_state_suffix}")
-                output_name.append(f"past_value.{layer_idx}{retained_state_suffix}")
+            if "compressed_kvs" in example_inputs:
+                output_name.append(f"compressed_kv.{layer_idx}{retained_state_suffix}")
+                output_name.append(f"k_pe.{layer_idx}{retained_state_suffix}")
+                if "indexer_key_cache" in example_inputs:
+                    output_name.append(f"indexer_key_cache.{layer_idx}{retained_state_suffix}")
             else:
-                output_name.extend(
-                    [
-                        f"{name}{retained_state_suffix}"
-                        for name in _resolve_pkv_names(layer_idx, layer_states[layer_idx])
-                    ]
-                )
+                layer_states = _resolve_pkv_layers(example_inputs.get("past_key_values"))
+                if layer_states is None:
+                    output_name.append(f"past_key.{layer_idx}{retained_state_suffix}")
+                    output_name.append(f"past_value.{layer_idx}{retained_state_suffix}")
+                else:
+                    output_name.extend(
+                        [
+                            f"{name}{retained_state_suffix}"
+                            for name in _resolve_pkv_names(layer_idx, layer_states[layer_idx])
+                        ]
+                    )
 
         # Inject the optional vLLM KV-cache prefix into the freshly built per-window output names
         # (past_key.3_RetainedState -> past_key.3_<prefix>_RetainedState), using the same helper the
@@ -923,6 +930,13 @@ class QEFFBaseModel(ABC):
         if blocking_config is not None:
             self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
             self.hash_params["blocking_kwargs"] = blocking_config
+
+        if ctx_len is not None and getattr(model_config, "model_type", None) == "glm_moe_dsa":
+            for module in self.model.modules():
+                if module.__class__.__name__ == "QEffGlmMoeDsaAttention":
+                    module.dsa_ctx_len = ctx_len
+                    if hasattr(module, "indexer"):
+                        module.indexer.ctx_len_hint = ctx_len
 
     @dump_qconfig
     def _compile(

@@ -245,25 +245,37 @@ class RenameFunctionOutputsTransform(BaseOnnxTransform):
                     if "_InternalRetainedState" in out_name:
                         renamed = True
                         orig = node.output[i]
-                        if orig.endswith("_InternalRetainedState"):
+
+                        if "indexer_key_cache" in out_name:
+                            # Special case: indexer_key_cache is not handled by the
+                            # generic token loop below, so reconstruct explicitly.
+                            new = f"indexer_key_cache.{layer_idx}_RetainedState"
+
+                        elif orig.endswith("_InternalRetainedState"):
+                            # Standard case: orig already carries the correct layer index
+                            # and any KV prefix infix (e.g. past_key.0_vllmKvCache),
+                            # so a simple suffix swap is sufficient.
                             new = orig[: -len("_InternalRetainedState")] + "_RetainedState"
+
                         else:
+                            # Fallback: orig name is not well-formed, reconstruct from
+                            # out_name using the layer_idx counter and infix detection.
                             base = out_name[: -len("_InternalRetainedState")]
                             new = orig
                             for token in ("past_key.", "past_value.", "compressed_kv.", "k_pe."):
                                 if not base.startswith(token):
                                     continue
-                                tail = base[len(token) :]
+                                tail = base[len(token):]
                                 _, _, infix = tail.partition("_")
                                 infix = f"_{infix}" if infix else ""
                                 new = f"{token}{layer_idx}{infix}_RetainedState"
                                 break
+
                         node.output[i] = new
                         if orig in model_out_map:
                             graph.output[model_out_map[orig]].name = new
                 layer_idx += 1
         return renamed
-
 
 class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
     """Expose nested decoder cache side effects as explicit ONNX values."""
