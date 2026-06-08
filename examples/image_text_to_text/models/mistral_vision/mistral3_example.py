@@ -35,6 +35,8 @@ def run_model(
 
     config = AutoConfig.from_pretrained(model_name)
     config.vision_config._attn_implementation = "eager"
+    config.text_config.num_hidden_layers = 4
+    config.vision_config.num_hidden_layers = 4
 
     model = QEFFAutoModelForImageTextToText.from_pretrained(model_name, kv_offload=kv_offload, config=config)
 
@@ -47,6 +49,8 @@ def run_model(
         num_cores=num_cores,
         num_devices=num_devices,
         mxfp6_matmul=False,
+        use_dynamo=True,
+        use_onnx_subfunctions=True,
     )
 
     ## STEP - 3 Load and process the inputs for Inference
@@ -79,7 +83,7 @@ if __name__ == "__main__":
     image_url = "https://www.ilankelman.org/stopsigns/australia.jpg"
 
     # Compilation parameters for the model
-    kv_offload = True
+    kv_offload = False
     prefill_seq_len = 128
     ctx_len = 4096
     generation_len = 128

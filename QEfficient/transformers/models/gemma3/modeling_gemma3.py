@@ -5,7 +5,6 @@
 #
 # -----------------------------------------------------------------------------
 
-import copy
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
@@ -41,7 +40,7 @@ from QEfficient.utils.custom_op_utils import select_interface
 class GemmaRMSNormFunc(torch.autograd.Function):
     @staticmethod
     def forward(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float):
-        div_first = hidden_states * torch.rsqrt(torch.tensor(hidden_states.shape[-1], dtype=hidden_states.dtype))
+        div_first = hidden_states * (hidden_states.shape[-1] ** -0.5)
         variance = div_first.pow(2).sum(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + epsilon)
         return weight * hidden_states
@@ -67,7 +66,6 @@ class QEffGemma3CustomRMSNormAIC(nn.Module):
             (self.weight).to(hidden_states.dtype) + 1.0,
             self.variance_epsilon if hasattr(self, "variance_epsilon") else self.eps,
         )
-        return out.to(hidden_states.dtype)
 
 
 class QEffGemma3RotaryEmbedding(nn.Module):
@@ -167,9 +165,7 @@ def eager_attention_forward(
         attn_weights = attn_weights * softcap
 
     if attention_mask is not None:
-        attn_weights = torch.where(
-            attention_mask, torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=module.config.torch_dtype), attn_weights
-        )
+        attn_weights = attn_weights.masked_fill(attention_mask, MIN_MASKED_ATTENTION_VALUE)
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -262,11 +258,7 @@ class QEffGemma3Attention(Gemma3Attention):
             attn_weights = attn_weights * self.config.attn_logit_softcapping
 
         if attention_mask is not None:  # no matter the length, we just slice it
-            attn_weights = torch.where(
-                attention_mask.bool(),
-                torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=self.config.torch_dtype),
-                attn_weights,
-            )
+            attn_weights = attn_weights.masked_fill(attention_mask.bool(), MIN_MASKED_ATTENTION_VALUE)
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -709,6 +701,8 @@ class QEffGemma3DecoderWrapper(nn.Module):
                 for layer in present.layers:
                     legacy_cache += ((getattr(layer, "keys", None), getattr(layer, "values", None)),)
                 present = legacy_cache
+
+        vision_embeds = vision_embeds.clone()
         return logits, vision_embeds, image_idx, present
 
 
@@ -770,6 +764,8 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
                 for layer in present.layers:
                     legacy_cache += ((getattr(layer, "keys", None), getattr(layer, "values", None)),)
                 present = legacy_cache
+
+        pixel_values = pixel_values.detach().clone()
         return logits, pixel_values, image_idx, present
 
     def get_npi_file(self, model_name: str) -> str:
@@ -954,6 +950,7 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
         self,
         comp_ctx_lengths: Optional[List[int]] = None,
         kv_offload: bool = False,
+        continuous_batching: bool = False,
     ) -> Dict[str, Any]:
         """
         - Handles past_key_values as a list of (key, value) pairs per layer
@@ -969,10 +966,10 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
         """
 
         num_layers = self.language_model.config.num_hidden_layers
-        config = self.language_model.config
+        # config = self.language_model.config
 
-        layer_switch = config.sliding_window_pattern if hasattr(config, "sliding_window_pattern") else 2
-        has_sliding_window = hasattr(config, "sliding_window")
+        # layer_switch = config.sliding_window_pattern if hasattr(config, "sliding_window_pattern") else 2
+        # has_sliding_window = hasattr(config, "sliding_window")
         # sliding_window = getattr(config, "sliding_window", None)
 
         # Registry of Dim objects so that dims with the same name share the same Dim
@@ -983,6 +980,10 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
                 return dim_registry[dim_name]
             if dim_name == "batch_size":
                 d = Dim(dim_name, min=1, max=1024)
+            elif dim_name == "vision_batch_size":
+                d = Dim(dim_name, min=1, max=1024)
+            elif dim_name == "full_batch_size":
+                d = Dim(dim_name, min=1, max=1024)
             elif "seq_len" in dim_name:
                 d = Dim(dim_name, min=2, max=4095)
             elif "img_size" in dim_name:
@@ -990,8 +991,6 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
             elif "mm_tokens_per_image" in dim_name:
                 d = Dim(dim_name, min=1, max=4096)
             elif "ctx_len" in dim_name:
-                d = Dim(dim_name, min=2, max=4095)
-            elif "sliding_window" in dim_name:
                 d = Dim(dim_name, min=2, max=4095)
             elif "idx" in dim_name:
                 d = Dim.STATIC
@@ -1002,33 +1001,74 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
             dim_registry[dim_name] = d
             return d
 
+        # def build_past_kv_shapes() -> List[Tuple[Dict[int, Any], Dict[int, Any]]]:
+        #     """
+        #     Returns:
+        #         list of length num_layers, each element is:
+        #           (past_key_shape_dict, past_value_shape_dict)
+        #     past_* tensor shape: (batch_size, num_key_value_heads, cache_len, head_dim)
+        #     where cache_len is either ctx_len or sliding_window, depending on layer.
+        #     """
+        #     past_kv_shapes: List[Tuple[Dict[int, Any], Dict[int, Any]]] = []
+        #     for i in range(num_layers):
+        #         # Decide whether this layer uses global ctx_len or sliding_window
+        #         if has_sliding_window and ((i + 1) % layer_switch):
+        #             # sliding-window layer
+        #             cache_len_dim = get_dim("sliding_window")
+        #         else:
+        #             # global cache layer
+        #             cache_len_dim = get_dim("ctx_len")
+
+        #         past_key_shape = {
+        #             0: get_dim("full_batch_size" if continuous_batching else "batch_size"),
+        #             2: cache_len_dim,
+        #         }
+        #         past_value_shape = {
+        #             0: get_dim("full_batch_size" if continuous_batching else "batch_size"),
+        #             2: cache_len_dim,
+        #         }
+        #         past_kv_shapes.append((past_key_shape, past_value_shape))
+        #     return past_kv_shapes
+
         def build_past_kv_shapes() -> List[Tuple[Dict[int, Any], Dict[int, Any]]]:
             """
             Returns:
                 list of length num_layers, each element is:
-                  (past_key_shape_dict, past_value_shape_dict)
-            past_* tensor shape: (batch_size, num_key_value_heads, cache_len, head_dim)
-            where cache_len is either ctx_len or sliding_window, depending on layer.
+                    (past_key_shape_dict, past_value_shape_dict)
+
+            past_* tensor shape:
+                (batch_size/full_batch_size, num_key_value_heads, cache_len, head_dim)
+
+            cache_len:
+                - ctx_len  → global attention layers
+                - sliding_window → sliding attention layers
             """
+
             past_kv_shapes: List[Tuple[Dict[int, Any], Dict[int, Any]]] = []
+
+            pkv_batch_dim = get_dim("full_batch_size" if continuous_batching else "batch_size")
+
             for i in range(num_layers):
-                # Decide whether this layer uses global ctx_len or sliding_window
-                if has_sliding_window and ((i + 1) % layer_switch):
-                    # sliding-window layer
-                    cache_len_dim = get_dim("sliding_window")
-                else:
-                    # global cache layer
-                    cache_len_dim = get_dim("ctx_len")
+                # use_sliding = (
+                #     hasattr(config, "_sliding_window_pattern") and
+                #     ((i + 1) % layer_switch != 0)
+                # )
+
+                # ✅ choose correct dimension
+                shape_dim = get_dim("ctx_len")
 
                 past_key_shape = {
-                    0: get_dim("batch_size"),
-                    2: cache_len_dim,
+                    0: pkv_batch_dim,
+                    2: shape_dim,
                 }
+
                 past_value_shape = {
-                    0: get_dim("batch_size"),
-                    2: cache_len_dim,
+                    0: pkv_batch_dim,
+                    2: shape_dim,
                 }
+
                 past_kv_shapes.append((past_key_shape, past_value_shape))
+
             return past_kv_shapes
 
         # kv_offload=True  →  separate vision/lang exports
@@ -1050,7 +1090,7 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
                     1: get_dim("seq_len"),
                 },
                 "vision_embeds": {
-                    0: get_dim("batch_size"),
+                    0: get_dim("vision_batch_size"),
                     1: get_dim("mm_tokens_per_image"),
                 },
                 "position_ids": {
@@ -1068,6 +1108,10 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
             if comp_ctx_lengths is not None:
                 lang_dynamic_shapes["comp_ctx_lengths"] = {
                     0: get_dim("comp_ctx_lengths"),
+                }
+            if continuous_batching:
+                lang_dynamic_shapes["batch_index"] = {
+                    0: get_dim("batch_size"),
                 }
 
             return {
@@ -1116,7 +1160,8 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
 
         return dynamic_shapes
 
-    def get_dummy_pkv_cache(self, config, batch_size, seq_len):
+    def get_dummy_pkv_cache(self, config, batch_size, seq_len, dtype=None):
+        dtype = dtype or getattr(config, "torch_dtype", torch.float32)
         n_heads = config.num_key_value_heads
         d_head = config.head_dim
         layer_switch = (

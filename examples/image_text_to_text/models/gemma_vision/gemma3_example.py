@@ -5,7 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-import os
+from pathlib import Path
 
 import torch
 import transformers
@@ -14,25 +14,35 @@ from transformers import AutoConfig, AutoProcessor
 from QEfficient import QEFFAutoModelForImageTextToText
 
 # Change model_id to "google/gemma-3-27b-it" for 27B model
-model_id = "google/gemma-3-27b-it"
+model_id = "google/gemma-3-4b-it"
 
 config = AutoConfig.from_pretrained(model_id)
 
 # For Testing Purpose Only atleast 6 layers are required
-# config.text_config.num_hidden_layers = 6
-# config.vision_config.num_hidden_layers = 6
+config.text_config.num_hidden_layers = 6
+config.vision_config.num_hidden_layers = 6
 
 tokenizer = transformers.AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 processor = AutoProcessor.from_pretrained(model_id)
 
-# Path to Node Precision Info YAML file, please refer to the README.md file located at gemma_vision/README.md for more details.
-npi_file_path = "configs/gemma_updated_npi.yaml"
-npi_file_full_path = os.path.join(os.getcwd(), npi_file_path)
+# Path to Node Precision Info YAML file (resolved relative to this script directory).
+# For 4B use fp32_nodes_gemma3_4b.yaml, for 27B use gemma_updated_npi.yaml.
+script_dir = Path(__file__).resolve().parent
+if "27b" in model_id.lower():
+    npi_file_name = "gemma_updated_npi.yaml"
+else:
+    npi_file_name = "fp32_nodes_gemma3_4b.yaml"
+npi_file_full_path = script_dir / "configs" / npi_file_name
+
+if not npi_file_full_path.exists():
+    raise FileNotFoundError(f"NPI file not found: {npi_file_full_path}")
 
 # For single QPC: kv_offload=False, For dual QPC: kv_offload=True
 qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
-    model_id, config=config, attn_implementation="eager", kv_offload=True
+    model_id, config=config, attn_implementation="eager", kv_offload=False
 )
+
+# qeff_model.model.eval()
 
 ### use skip_vision=True, if want to run only text, or false ###
 skip_vision = False
@@ -50,7 +60,9 @@ if skip_vision:
         aic_enable_depth_first=True,
         skip_vision=True,
         mos=1,
-        node_precision_info=npi_file_full_path,
+        node_precision_info=str(npi_file_full_path),
+        use_dynamo=True,
+        use_onnx_subfunctions=True,
     )
 
     messages = [
@@ -86,7 +98,9 @@ else:
         mxint8_kv_cache=False,
         aic_enable_depth_first=True,
         mos=1,
-        node_precision_info=npi_file_full_path,
+        node_precision_info=str(npi_file_full_path),
+        use_dynamo=True,
+        use_onnx_subfunctions=True,
     )
 
     ### IMAGE + TEXT ###

@@ -32,7 +32,7 @@ from transformers import (
 
 import QEfficient
 from QEfficient.base.modeling_qeff import QEFFBaseModel
-from QEfficient.base.onnx_transforms import FP16ClipTransform, RewriteUnsupportedOpsTransform, SplitTensorsTransform
+from QEfficient.base.onnx_transforms import FP16ClipTransform, RewriteUnsupportedOpsTransform
 from QEfficient.base.pytorch_transforms import SplitGateUpWeightsTransform
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.generation.text_generation_inference import (
@@ -1163,7 +1163,10 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         dynamic_shapes,
         export_dir=None,
         offload_pt_weights=True,
-        use_dynamo: Optional[bool] = False,
+        prefill_seq_len: Optional[int] = None,
+        prefill_only: bool = False,
+        enable_chunking: bool = False,
+        use_dynamo: bool = False,
         **kwargs,
     ):
         """
@@ -1193,6 +1196,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         str
             Path to the generated ONNX graph file for the language decoder.
         """
+        use_onnx_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
 
         if prefill_only:
             assert prefill_seq_len > 1
@@ -1213,7 +1217,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 dynamic_axes=dynamic_axes,
                 export_dir=export_dir,
                 offload_pt_weights=offload_pt_weights,
-                use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+                use_onnx_subfunctions=use_onnx_subfunctions,
             )
         else:
             return self._export(
@@ -1222,12 +1226,11 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 dynamic_axes=dynamic_axes,
                 export_dir=export_dir,
                 offload_pt_weights=offload_pt_weights,
-                use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+                use_onnx_subfunctions=use_onnx_subfunctions,
                 dynamic_shapes=dynamic_shapes,
                 use_dynamo=use_dynamo,
                 **kwargs,
             )
-
 
     def compile(
         self,
@@ -1409,6 +1412,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         export_dir: Optional[str] = None,
         use_onnx_subfunctions: bool = False,
         use_dynamo: bool = False,
+        skip_vision: Optional[bool] = False,
+        skip_lang: Optional[bool] = False,
+        prefill_seq_len: Optional[int] = None,
+        prefill_only: bool = False,
+        enable_chunking: bool = False,
         **kwargs,
     ) -> str:
         """
@@ -1460,7 +1468,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         dynamic_shapes["lang"] = None
         if use_dynamo:
             dynamic_shapes = self.model.get_onnx_dynamic_shapes(
-                kv_offload=True, comp_ctx_lengths=self.comp_ctx_lengths_decode
+                kv_offload=True,
+                comp_ctx_lengths=self.comp_ctx_lengths_decode,
+                continuous_batching=self.continuous_batching,
             )
         output_names = self.model.get_output_names(kv_offload=True)
         if self.lang_model.model.qaic_config is not None and self.lang_model.model.qaic_config.get(
@@ -1492,23 +1502,17 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 inputs["vision"],
                 output_names["vision"],
                 dynamic_axes["vision"],
+                dynamic_shapes["vision"],
                 export_dir=export_dir,
                 offload_pt_weights=False,
                 use_onnx_subfunctions=use_onnx_subfunctions,
+                use_dynamo=use_dynamo,
             )
 
-        self.vision_model.export(
-            inputs["vision"],
-            output_names["vision"],
-            dynamic_axes["vision"],
-            export_dir=export_dir,
-            offload_pt_weights=False,
-            use_onnx_subfunctions=use_onnx_subfunctions,
-            use_dynamo=use_dynamo,
-            dynamic_shapes=dynamic_shapes["vision"],
-        )
-
-        offload_pt_weights = kwargs.get("offload_pt_weights", True)
+        if prefill_only and prefill_seq_len > 1:
+            offload_pt_weights = False  # to keep weight for decode onnx
+        else:
+            offload_pt_weights = kwargs.get("offload_pt_weights", True)
         self.lang_model.export(
             inputs["lang"],
             output_names["lang"],
@@ -1525,9 +1529,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 inputs["lang"],
                 output_names["lang"],
                 dynamic_axes["lang"],
+                dynamic_shapes["lang"],
                 export_dir=export_dir,
                 offload_pt_weights=offload_pt_weights,
                 use_onnx_subfunctions=use_onnx_subfunctions,
+                use_dynamo=use_dynamo,
                 prefill_only=prefill_only,
                 enable_chunking=enable_chunking,
                 prefill_seq_len=prefill_seq_len,
@@ -1583,6 +1589,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         skip_lang: Optional[bool] = False,
         use_onnx_subfunctions: bool = False,
         use_dynamo: bool = False,
+        prefill_only=None,
+        enable_chunking=False,
+        qaic_config: Optional[dict] = None,
         **compiler_options,
     ) -> str:
         """
@@ -2411,6 +2420,7 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         num_speculative_tokens: Optional[int] = None,
         use_onnx_subfunctions: bool = False,
         use_dynamo: bool = False,
+        qaic_config: Optional[dict] = None,
         **compiler_options,
     ) -> str:
         """
@@ -3723,7 +3733,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if use_dynamo:
             dynamic_shapes = self.convert_dynamic_axes_to_dynamic_shapes(dynamic_axes)
 
-
         if os.environ.get("LAYERWISE_EXPORT", "False") == "True":
             return self._export_layerwise(
                 example_inputs,
@@ -3746,7 +3755,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 offload_pt_weights=kwargs.get("offload_pt_weights", True),
                 prefill_only=prefill_only,
             )
-
 
     def build_prefill_specialization(
         self,

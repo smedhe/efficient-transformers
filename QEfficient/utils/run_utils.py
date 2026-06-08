@@ -20,6 +20,31 @@ from QEfficient.transformers.cache_utils import QEffDynamicCache
 from QEfficient.utils.generate_inputs import InputHandler, InputHandlerInternVL, InputHandlerVLM
 
 
+def _resolve_runner_dtype(config, dtype):
+    """
+    Resolve dtype for runner-created tensors.
+
+    Priority:
+      1) Explicit dtype argument
+      2) config.torch_dtype (torch.dtype or string like "float16")
+      3) torch.float32 fallback
+    """
+    if dtype is not None:
+        return dtype
+
+    cfg_dtype = getattr(config, "torch_dtype", None)
+    if isinstance(cfg_dtype, torch.dtype):
+        return cfg_dtype
+
+    if isinstance(cfg_dtype, str):
+        attr_name = cfg_dtype.split(".")[-1]
+        resolved = getattr(torch, attr_name, None)
+        if isinstance(resolved, torch.dtype):
+            return resolved
+
+    return torch.float32
+
+
 # TODO: Deprecate this class and encourage the use of `QeffAutoModel...` classes
 class ApiRunner:
     """
@@ -32,9 +57,7 @@ class ApiRunner:
     4. ``ONNX`` model on Cloud AI 100
     """
 
-    def __init__(
-        self, batch_size, tokenizer, config, prompt, prompt_len, ctx_len, full_batch_size=None, dtype=torch.float32
-    ):
+    def __init__(self, batch_size, tokenizer, config, prompt, prompt_len, ctx_len, full_batch_size=None, dtype=None):
         """
         Initialization
 
@@ -46,6 +69,7 @@ class ApiRunner:
             :prompt_len (int): Prompt length to compile the model.
             :ctx_len (int): Maximum context length to compile the model.
         """
+        resolved_dtype = _resolve_runner_dtype(config, dtype)
         self.input_handler = InputHandler(
             batch_size=batch_size,
             tokenizer=tokenizer,
@@ -54,7 +78,7 @@ class ApiRunner:
             prompt_len=prompt_len,
             ctx_len=ctx_len,
             full_batch_size=full_batch_size,
-            dtype=dtype,
+            dtype=resolved_dtype,
         )
 
         self.gen_len = self.input_handler.ctx_len - self.input_handler.prompt_len
@@ -246,9 +270,7 @@ class ApiRunner:
                 continue
             np_tensor = onnx.numpy_helper.to_array(tensor)
             if len(np_tensor.shape) == 0 and np_tensor.item() == 2147483647:
-                added_initializers[tensor.name] = onnxruntime.OrtValue.ortvalue_from_numpy(
-                    np.array(0, np_tensor.dtype)
-                )
+                added_initializers[tensor.name] = onnxruntime.OrtValue.ortvalue_from_numpy(np.array(0, np_tensor.dtype))
 
         session_options = onnxruntime.SessionOptions()
         for name, value in added_initializers.items():
@@ -340,9 +362,10 @@ class ApiRunnerVlm:
         ctx_len,
         max_gen_len,
         n_layer,
-        dtype=torch.float32,
+        dtype=None,
     ):
         """ """
+        resolved_dtype = _resolve_runner_dtype(config, dtype)
         self.input_handler_vlm = InputHandlerVLM(
             batch_size=batch_size,
             prompt_len=prompt_len,
@@ -354,6 +377,7 @@ class ApiRunnerVlm:
             processor=processor,
             n_layer=n_layer,
             prompt=prompt,
+            dtype=resolved_dtype,
         )
         self.processor = processor
         self.ctx_len = ctx_len
@@ -361,7 +385,7 @@ class ApiRunnerVlm:
         self.batch_size = batch_size
         self.config = config
         self.gen_len = max_gen_len
-        self.dtype = dtype
+        self.dtype = resolved_dtype
 
     @torch.no_grad()
     def run_vlm_hf_model_on_pytorch_CB(self, model, images, queries):
@@ -461,6 +485,7 @@ class ApiRunnerVlm:
         for inp_name in session_input_names:
             if inp_name in inputs.keys():
                 session_inputs[inp_name] = inputs[inp_name]
+        session_inputs["input_ids"] = session_inputs["input_ids"].astype(np.int64)
         outputs_data = session.run(output_names, session_inputs)
         ort_outputs = dict(zip(output_names, outputs_data))
         return ort_outputs
@@ -574,9 +599,10 @@ class ApiRunnerInternVL(ApiRunnerVlm):
         ctx_len,
         max_gen_len,
         n_layer,
-        dtype=torch.float32,
+        dtype=None,
     ):
         """ """
+        resolved_dtype = _resolve_runner_dtype(config, dtype)
         self.input_handler_vlm = InputHandlerInternVL(
             batch_size=batch_size,
             prompt_len=prompt_len,
@@ -587,6 +613,7 @@ class ApiRunnerInternVL(ApiRunnerVlm):
             processor=processor,
             n_layer=n_layer,
             prompt=prompt,
+            dtype=resolved_dtype,
         )
         self.processor = processor
         self.ctx_len = ctx_len
@@ -594,7 +621,7 @@ class ApiRunnerInternVL(ApiRunnerVlm):
         self.batch_size = batch_size
         self.config = config
         self.gen_len = max_gen_len
-        self.dtype = dtype
+        self.dtype = resolved_dtype
 
     @torch.no_grad()
     def run_vlm_hf_model_on_pytorch_CB(self, model, images, queries):
@@ -680,15 +707,16 @@ class ApiRunnerMolmo(ApiRunnerVlm):
         ctx_len,
         max_gen_len,
         n_layer,
-        dtype=torch.float32,
+        dtype=None,
     ):
+        resolved_dtype = _resolve_runner_dtype(config, dtype)
         self.processor = processor
         self.ctx_len = ctx_len
         self.prompt_len = prompt_len
         self.batch_size = batch_size
         self.config = config
         self.gen_len = max_gen_len
-        self.dtype = dtype
+        self.dtype = resolved_dtype
 
     @torch.no_grad()
     def run_vlm_hf_model_on_pytorch(self, model, inputs, generation_config):

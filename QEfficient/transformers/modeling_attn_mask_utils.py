@@ -10,6 +10,14 @@ from typing import Optional
 import torch
 
 
+def _remainder_with_symbolic_divisor(value: torch.Tensor, divisor) -> torch.Tensor:
+    if torch.is_tensor(divisor):
+        divisor_tensor = divisor.to(device=value.device, dtype=value.dtype)
+    else:
+        divisor_tensor = torch.scalar_tensor(divisor, dtype=value.dtype, device=value.device)
+    return torch.remainder(value, divisor_tensor)
+
+
 def _create_causal_mask(
     position_ids,
     target_length,
@@ -26,7 +34,8 @@ def _create_causal_mask(
         kv_indices = torch.arange(target_length).view(1, -1)
         # --- Rolling buffer ---
         pos_max = position_ids.max(1, keepdim=True).values
-        kv_start = (pos_max // target_length) * target_length
+        # Use tensor-divisor remainder to avoid remainder.Scalar conversion issues.
+        kv_start = pos_max - _remainder_with_symbolic_divisor(pos_max, target_length)
         kv_indices_high = kv_indices + kv_start
         kv_indices_low = torch.where(kv_indices_high < target_length, kv_indices, kv_indices_high - target_length)
         kv_indices = torch.where(kv_indices_high > pos_max, kv_indices_low, kv_indices_high)

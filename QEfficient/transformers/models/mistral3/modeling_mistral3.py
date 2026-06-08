@@ -17,11 +17,11 @@ from transformers.models.mistral3.modeling_mistral3 import (
     Mistral3ForConditionalGeneration,
     Mistral3Model,
     Mistral3ModelOutputWithPast,
+    Mistral3PatchMerger,
 )
 from transformers.models.pixtral.modeling_pixtral import (
     PixtralAttentionLayer,
     PixtralVisionModel,
-    position_ids_in_meshgrid,
 )
 
 from QEfficient.utils import constants
@@ -37,6 +37,90 @@ def custom_cumsum(tensor):
         indices[dim] = slice(0, i + 1)
         result.select(dim, i).copy_(tensor[tuple(indices)].sum(dim))
     return result
+
+
+def _remainder_with_symbolic_divisor(value: torch.Tensor, divisor) -> torch.Tensor:
+    if torch.is_tensor(divisor):
+        divisor_tensor = divisor.to(device=value.device, dtype=value.dtype)
+    else:
+        divisor_tensor = torch.scalar_tensor(divisor, dtype=value.dtype, device=value.device)
+    return torch.remainder(value, divisor_tensor)
+
+
+class QEffMistral3PatchMerger(Mistral3PatchMerger):
+    def forward(self, image_features: torch.Tensor, image_sizes: torch.Tensor) -> torch.Tensor:
+        image_sizes = [
+            (image_size[0] // self.patch_size, image_size[1] // self.patch_size) for image_size in image_sizes
+        ]
+        tokens_per_image = [h * w for h, w in image_sizes]
+        d = image_features.shape[-1]
+
+        permuted_tensor = []
+        for image_index, image_tokens in enumerate(image_features.split(tokens_per_image)):
+            h, w = image_sizes[image_index]
+            image_grid = image_tokens.view(h, w, d).permute(2, 0, 1).unsqueeze(0)
+            # Required for torch.export path only; torch.jit tracing expects Python bools.
+            if not torch.jit.is_tracing():
+                torch._check(image_grid.shape[2] != 0)
+                torch._check(image_grid.shape[3] != 0)
+                torch._check((image_grid.shape[2] // self.spatial_merge_size) > 0)
+                torch._check((image_grid.shape[3] // self.spatial_merge_size) > 0)
+            grid = torch.nn.functional.unfold(
+                image_grid, kernel_size=self.spatial_merge_size, stride=self.spatial_merge_size
+            )
+            grid = grid.view(d * self.spatial_merge_size**2, -1).t()
+            permuted_tensor.append(grid)
+
+        image_features = torch.cat(permuted_tensor, dim=0)
+        image_features = self.merging_layer(image_features)
+        return image_features
+
+
+def _ensure_export_safe_patch_merger(projector: nn.Module, config) -> None:
+    patch_merger = projector.patch_merger
+    if isinstance(patch_merger, QEffMistral3PatchMerger):
+        return
+    replacement = QEffMistral3PatchMerger(config)
+    replacement.load_state_dict(patch_merger.state_dict(), strict=True)
+    first_param = next(patch_merger.parameters(), None)
+    if first_param is not None:
+        replacement = replacement.to(device=first_param.device, dtype=first_param.dtype)
+    projector.patch_merger = replacement
+
+
+def _run_export_safe_multimodal_projector(
+    projector: nn.Module, image_features: torch.Tensor, image_sizes: torch.Tensor
+):
+    image_features = projector.norm(image_features)
+    patch_merger = projector.patch_merger
+    image_sizes_hw = [
+        (image_size[0] // patch_merger.patch_size, image_size[1] // patch_merger.patch_size)
+        for image_size in image_sizes
+    ]
+    tokens_per_image = [h * w for h, w in image_sizes_hw]
+    d = image_features.shape[-1]
+
+    merged_chunks = []
+    for image_index, image_tokens in enumerate(image_features.split(tokens_per_image)):
+        h, w = image_sizes_hw[image_index]
+        image_grid = image_tokens.view(h, w, d).permute(2, 0, 1).unsqueeze(0)
+        if not torch.jit.is_tracing():
+            torch._check(image_grid.shape[2] != 0)
+            torch._check(image_grid.shape[3] != 0)
+            torch._check((image_grid.shape[2] // patch_merger.spatial_merge_size) > 0)
+            torch._check((image_grid.shape[3] // patch_merger.spatial_merge_size) > 0)
+        grid = torch.nn.functional.unfold(
+            image_grid, kernel_size=patch_merger.spatial_merge_size, stride=patch_merger.spatial_merge_size
+        )
+        grid = grid.view(d * patch_merger.spatial_merge_size**2, -1).t()
+        merged_chunks.append(grid)
+
+    image_features = torch.cat(merged_chunks, dim=0)
+    image_features = patch_merger.merging_layer(image_features)
+    hidden_states = projector.linear_1(image_features)
+    hidden_states = projector.act(hidden_states)
+    hidden_states = projector.linear_2(hidden_states)
+    return hidden_states
 
 
 def qeff_generate_block_attention_mask(patch_embeds_list, tensor):
@@ -77,24 +161,39 @@ class QEffPixtralVisionModel(PixtralVisionModel):
         """
         # # pass images through initial convolution independently
         patch_embeds = self.patch_conv(pixel_values)
-        patch_embeds_list = [
-            embed[..., : (size[0] // self.patch_size), : (size[1] // self.patch_size)]
-            for embed, size in zip(patch_embeds, image_sizes)
-        ]
+        num_images = patch_embeds.shape[0]
+        tokens_per_image = patch_embeds.shape[2] * patch_embeds.shape[3]
+        # Keep a fixed per-image token grid to avoid ragged symbolic dims through
+        # repeated-subgraph extraction during ONNX decomposition.
+        patch_embeds_list = list(torch.unbind(patch_embeds, dim=0))
 
         # flatten to a single sequence
         patch_embeds = torch.cat([p.flatten(1).T for p in patch_embeds_list], dim=0).unsqueeze(0)
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
-        position_ids = position_ids_in_meshgrid(
-            patch_embeds_list, max_width=self.config.image_size // self.config.patch_size
-        )
+        # Use unique per-image position-id ranges to avoid shape mismatches in traced
+        # attention-mask paths when multiple images are concatenated.
+        max_width = self.config.image_size // self.config.patch_size
+        row_ids = torch.arange(patch_embeds_list[0].shape[-2], device=patch_embeds.device, dtype=torch.int64)
+        col_ids = torch.arange(patch_embeds_list[0].shape[-1], device=patch_embeds.device, dtype=torch.int64)
+        base_pos = (row_ids[:, None] * max_width + col_ids[None, :]).reshape(-1)
+        image_offsets = torch.arange(num_images, device=patch_embeds.device, dtype=torch.int64) * (max_width**2)
+        position_ids = (base_pos.unsqueeze(0) + image_offsets.unsqueeze(1)).reshape(-1)
         position_embeddings = self.patch_positional_embedding(patch_embeds, position_ids)
 
-        attention_mask = qeff_generate_block_attention_mask(
-            [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds
+        image_ids = torch.arange(num_images, dtype=torch.int64, device=patch_embeds.device)
+        token_image_ids = image_ids.unsqueeze(1).expand(num_images, tokens_per_image).reshape(-1)
+        same_image = token_image_ids.unsqueeze(0) == token_image_ids.unsqueeze(1)
+        d_min = torch.finfo(patch_embeds.dtype).min
+        attention_mask = torch.full(
+            (token_image_ids.shape[0], token_image_ids.shape[0]),
+            fill_value=d_min,
+            dtype=patch_embeds.dtype,
+            device=patch_embeds.device,
         )
+        attention_mask = attention_mask.masked_fill(same_image, 0)
+        attention_mask = attention_mask.unsqueeze(0).unsqueeze(0)
 
         out = self.transformer(
             patch_embeds,
@@ -134,13 +233,12 @@ class QEffMistral3Model(Mistral3Model):
             hs_pool = [image_outputs.hidden_states[layer_idx] for layer_idx in vision_feature_layer]
             selected_image_feature = torch.cat(hs_pool, dim=-1)
 
-        image_features = self.multi_modal_projector(selected_image_feature.squeeze(0), image_sizes)
-        downsample_ratio = self.vision_tower.patch_size * self.config.spatial_merge_size
-        split_sizes = (
-            (torch.as_tensor(image_sizes, device=image_features.device) // downsample_ratio).prod(dim=-1).tolist()
+        image_features = _run_export_safe_multimodal_projector(
+            self.multi_modal_projector, selected_image_feature.squeeze(0), image_sizes
         )
-        image_features = torch.split(image_features.squeeze(0), split_sizes)
-        image_outputs.pooler_output = image_features
+        batch_size = image_sizes.shape[0]
+        hidden_size = image_features.shape[-1]
+        image_outputs.pooler_output = image_features.view(batch_size, -1, hidden_size)
         return image_outputs
 
     def forward(
@@ -194,6 +292,7 @@ class QEFFMistral3EncoderWrapper(nn.Module):
         super().__init__()
         self.model = model
         self.model.model.vision_model = self.model.model.vision_tower
+        _ensure_export_safe_patch_merger(self.model.model.multi_modal_projector, self.model.config)
 
     def get_submodules_for_export(self) -> Type[nn.Module]:
         """
@@ -212,7 +311,7 @@ class QEFFMistral3EncoderWrapper(nn.Module):
             image_sizes=image_sizes,
             output_hidden_states=True,
         )
-        return torch.cat(image_features.pooler_output, dim=0)
+        return image_features.pooler_output.reshape(-1, image_features.pooler_output.shape[-1])
 
 
 class QEFFMistral3DecoderWrapper(nn.Module):
@@ -269,6 +368,7 @@ class QEFFMistral3DecoderWrapper(nn.Module):
 
 class QEffMistral3ForConditionalGeneration(Mistral3ForConditionalGeneration):
     def get_qeff_vision_encoder(self):
+        _ensure_export_safe_patch_merger(self.model.multi_modal_projector, self.config)
         return QEFFMistral3EncoderWrapper(self)
 
     def get_qeff_language_decoder(self):
@@ -299,13 +399,12 @@ class QEffMistral3ForConditionalGeneration(Mistral3ForConditionalGeneration):
             hs_pool = [image_outputs.hidden_states[layer_idx] for layer_idx in vision_feature_layer]
             selected_image_feature = torch.cat(hs_pool, dim=-1)
 
-        image_features = self.model.multi_modal_projector(selected_image_feature.squeeze(0), image_sizes)
-        downsample_ratio = self.model.vision_tower.patch_size * self.config.spatial_merge_size
-        split_sizes = (
-            (torch.as_tensor(image_sizes, device=image_features.device) // downsample_ratio).prod(dim=-1).tolist()
+        image_features = _run_export_safe_multimodal_projector(
+            self.model.multi_modal_projector, selected_image_feature.squeeze(0), image_sizes
         )
-        image_features = torch.split(image_features.squeeze(0), split_sizes)
-        image_outputs.pooler_output = image_features
+        batch_size = image_sizes.shape[0]
+        hidden_size = image_features.shape[-1]
+        image_outputs.pooler_output = image_features.view(batch_size, -1, hidden_size)
         return image_outputs
 
     def forward(
@@ -324,7 +423,9 @@ class QEffMistral3ForConditionalGeneration(Mistral3ForConditionalGeneration):
             vision_feature_layer=self.config.vision_feature_layer,
             image_sizes=image_sizes,
         )
-        image_features = torch.cat(image_features.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        image_features = image_features.pooler_output.reshape(-1, image_features.pooler_output.shape[-1]).to(
+            inputs_embeds.device, inputs_embeds.dtype
+        )
         mask = input_ids == self.config.image_token_index
         indices1 = mask.to(torch.int64).cumsum(1) - 1
         indices1 = torch.where(indices1 != -1, indices1 + image_idx, indices1)
@@ -586,6 +687,7 @@ class QEffMistral3ForConditionalGeneration(Mistral3ForConditionalGeneration):
         self,
         comp_ctx_lengths: Optional[List[int]] = None,
         kv_offload: bool = False,
+        continuous_batching: bool = False,
     ) -> Dict[str, Any]:
         num_layers = self.config.text_config.num_hidden_layers
 
@@ -603,7 +705,7 @@ class QEffMistral3ForConditionalGeneration(Mistral3ForConditionalGeneration):
             elif dim_name == "ctx_len":
                 d = Dim(dim_name, min=2, max=4096)
             elif dim_name == "image_size":
-                d = Dim(dim_name, min=2, max=4096)
+                d = Dim(dim_name, min=14, max=4096)
             elif dim_name == "vision_size":
                 d = Dim(dim_name, min=1, max=65536)
             elif "idx" in dim_name:

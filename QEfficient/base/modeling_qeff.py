@@ -14,7 +14,7 @@ import subprocess
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, List, Optional, OrderedDict, Union
+from typing import Dict, List, Optional, Union
 
 import onnx
 import torch
@@ -393,8 +393,11 @@ class QEFFBaseModel(ABC):
         # Rearrange example_inputs and dynamic_shapes to follow model.forward signature
         sig = inspect.signature(self.model.forward)
 
-        ordered_example_inputs = OrderedDict()
-        ordered_dynamic_shapes = OrderedDict() if dynamic_shapes is not None else None
+        # Use plain dicts here. torch.export currently validates pytree structure
+        # by concrete container type and may normalize kwargs inputs to `dict`,
+        # so `OrderedDict` for dynamic_shapes can mismatch even with same keys/order.
+        ordered_example_inputs = {}
+        ordered_dynamic_shapes = {} if dynamic_shapes is not None else None
 
         # First, add keys that are in the forward signature (in that order)
         for name, param in sig.parameters.items():
@@ -423,7 +426,7 @@ class QEFFBaseModel(ABC):
             if use_dynamo:
                 dynamic_axes = None
                 export_kwargs = dict(export_kwargs)
-                export_kwargs.setdefault("report", False)
+                export_kwargs.setdefault("report", True)
                 export_kwargs.setdefault("optimize", False)
                 export_kwargs["dynamo"] = True
                 export_kwargs["custom_translation_table"] = {

@@ -277,10 +277,9 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
 
         mask = (index_padded == -100).to(torch.int32)
 
-        if torch.jit.is_tracing():
-            order = torch.argsort(mask)
-        else:
-            order = torch.argsort(mask, stable=True)
+        # Use non-stable argsort to avoid lowering to aten.sort.stable,
+        # which may fail in dynamo->ONNX translation for this export path.
+        order = torch.argsort(mask)
 
         index_new = index_padded[order]
         index_new = index_new[: index.reshape(-1).size(0)]
@@ -417,15 +416,38 @@ def eager_attention_forward(
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) / math.sqrt(module.head_dim)
 
     if attention_mask is not None:
-        attn_weights = torch.where(
-            attention_mask, torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=module.config.torch_dtype), attn_weights
-        )
+        attn_weights = attn_weights.masked_fill(attention_mask, MIN_MASKED_ATTENTION_VALUE)
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, attn_weights
+
+
+def _clone_past_for_export(past_key_values, layer_idx: Optional[int] = None):
+    if hasattr(past_key_values, "layers"):
+        if layer_idx is not None and 0 <= layer_idx < len(past_key_values.layers):
+            layer = past_key_values.layers[layer_idx]
+            past_key_values = (getattr(layer, "keys", None), getattr(layer, "values", None))
+        elif isinstance(past_key_values, Cache) and hasattr(past_key_values, "to_legacy_cache"):
+            past_key_values = past_key_values.to_legacy_cache()
+        else:
+            legacy_cache = ()
+            for layer in past_key_values.layers:
+                legacy_cache += ((getattr(layer, "keys", None), getattr(layer, "values", None)),)
+            past_key_values = legacy_cache
+
+    def _clone_tensor_tree(x):
+        if torch.is_tensor(x):
+            return x.clone()
+        if isinstance(x, tuple):
+            return tuple(_clone_tensor_tree(v) for v in x)
+        if isinstance(x, list):
+            return [_clone_tensor_tree(v) for v in x]
+        return x
+
+    return _clone_tensor_tree(past_key_values)
 
 
 class QEffQwen2_5_VLAttention(Qwen2_5_VLAttention):
@@ -445,6 +467,7 @@ class QEffQwen2_5_VLAttention(Qwen2_5_VLAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         num_kv_blocks: Optional[torch.Tensor] = None,
         cos_cached: Optional[torch.Tensor] = None,
         sin_cached: Optional[torch.Tensor] = None,
@@ -512,7 +535,17 @@ class QEffQwen2_5_VLAttention(Qwen2_5_VLAttention):
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_values
+        present_key_values = None
+        if use_cache:
+            if use_blocking:
+                # Keep subgraph layer-local: return only this layer's KV.
+                present_key_values = _clone_past_for_export(past_key_values, layer_idx=self.layer_idx)
+            else:
+                present_key_values = (key_states, value_states)
+                if torch.onnx.is_in_onnx_export():
+                    present_key_values = _clone_past_for_export(present_key_values)
+
+        return attn_output, attn_weights, present_key_values
 
 
 class QEffQwen2_5_VLDecoderLayer(Qwen2_5_VLDecoderLayer):
@@ -528,8 +561,10 @@ class QEffQwen2_5_VLDecoderLayer(Qwen2_5_VLDecoderLayer):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         sin_cached=None,
         cos_cached=None,
+        *args,
         # position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -570,6 +605,7 @@ class QEffQwen2_5_VLDecoderLayer(Qwen2_5_VLDecoderLayer):
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
+            position_embeddings=position_embeddings,
             sin_cached=sin_cached,
             cos_cached=cos_cached,
             **kwargs,
@@ -588,6 +624,7 @@ class QEffQwen2_5_VLDecoderLayer(Qwen2_5_VLDecoderLayer):
             outputs += (self_attn_weights,)
 
         if use_cache:
+            present_key_value = _clone_past_for_export(present_key_value)
             outputs += (present_key_value,)
 
         return outputs
@@ -748,6 +785,14 @@ class QEffQwen_2_5_vl_EncoderWrapper(nn.Module):
         super().__init__()
         self.model = model.model
         self.model.vision_model = self.model.visual
+        proj = self.model.visual.patch_embed.proj
+        if proj.bias is None:
+            zero_bias = torch.zeros(
+                proj.weight.shape[0],
+                dtype=proj.weight.dtype,
+                device=proj.weight.device,
+            )
+            proj.bias = torch.nn.Parameter(zero_bias, requires_grad=False)
 
     def get_submodules_for_export(self) -> Type[nn.Module]:
         """
@@ -761,8 +806,8 @@ class QEffQwen_2_5_vl_EncoderWrapper(nn.Module):
     def forward(self, pixel_values, image_grid_thw):
         image_embeds = self.model.visual(pixel_values, grid_thw=image_grid_thw)
         bs = image_grid_thw.shape[0]
-        split_size = torch.floor_divide(torch.tensor(image_embeds.size(0)), bs)
-        image_embeds = image_embeds.reshape(bs, split_size, image_embeds.size(1))
+        split_size = image_embeds.shape[0] // bs
+        image_embeds = image_embeds.view(bs, split_size, image_embeds.shape[1])
 
         return image_embeds
 
@@ -816,6 +861,7 @@ class QEffQwen_2_5_vl_DecoderWrapper(nn.Module):
         logits = logits.float()
         image_idx = (indices1.max() + 1).unsqueeze(0).unsqueeze(0)
 
+        vision_embeds = vision_embeds.detach().clone()
         return logits, vision_embeds, image_idx, outputs.past_key_values
 
 
@@ -883,10 +929,11 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
             seq_len=prefill_seq_len,
         )
 
-        lang_inputs["past_key_values"] = [[] for _ in range(self.model.config.text_config.num_hidden_layers)]
-        for i in range(self.model.config.text_config.num_hidden_layers):
-            for kv in ["key", "value"]:
-                lang_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape, dtype=self.config.torch_dtype))
+        lang_inputs["past_key_values"] = []
+        for _ in range(self.model.config.text_config.num_hidden_layers):
+            key_cache = torch.zeros(kv_cache_shape, dtype=self.config.torch_dtype)
+            value_cache = torch.zeros(kv_cache_shape, dtype=self.config.torch_dtype)
+            lang_inputs["past_key_values"].append((key_cache, value_cache))
 
         if continuous_batching:
             lang_inputs["batch_index"] = torch.arange(bs).view(bs, 1)
@@ -1274,7 +1321,7 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
 
         # past_key_values: list[(key, value) ...] per layer,
         # key/value: (batch_size or full_batch_size, num_heads, ctx_len, head_dim)
-        past_kv_shapes: List[List[Dict[int, Any], Dict[int, Any]]] = []
+        past_kv_shapes: List[Tuple[Dict[int, Any], Dict[int, Any]]] = []
         batch_dim_name = "full_batch_size" if continuous_batching else "batch_size"
         for _ in range(num_layers):
             past_key_shape = {
@@ -1285,7 +1332,7 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
                 0: get_dim(batch_dim_name),
                 2: get_dim("ctx_len"),
             }
-            past_kv_shapes.append([past_key_shape, past_value_shape])
+            past_kv_shapes.append((past_key_shape, past_value_shape))
 
         dynamic_shapes["past_key_values"] = past_kv_shapes
         dynamic_shapes["kwargs"] = {
@@ -1363,7 +1410,20 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
         ]
 
 
-class QEffQwen2_5_VLVisionBlock(Qwen2_5_VLVisionBlock):
+class QEffQwen2_5_VLVisionBlockRegion(QEffQwen2_5_VLVisionBlock):
     @torch.compiler.nested_compile_region
-    def forward(self, *args, **kwargs):
-        return super().forward(*args, **kwargs)
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        rotary_pos_emb: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        return super().forward(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            rotary_pos_emb=rotary_pos_emb,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )

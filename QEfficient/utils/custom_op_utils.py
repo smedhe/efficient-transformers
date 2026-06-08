@@ -83,7 +83,41 @@ def _(
     ctx_indices: torch.Tensor,
     comp_ctx_len: int,
 ) -> torch.Tensor:
-    return torch.empty_like(data)
+    batch_size = data.shape[0]
+    num_heads = data.shape[1]
+    seq_len = comp_ctx_len
+    feature_shape = data.shape[3:]
+    out_shape = (batch_size, num_heads, seq_len, *feature_shape)
+    return torch.empty(out_shape, dtype=data.dtype, device=data.device)
+
+
+# GATHER BLOCKED KV
+@torch.library.custom_op("qefficient::ctx_gather_blocked_kv", mutates_args=())
+def ctx_gather_blocked_kv_op(
+    data: torch.Tensor,
+    ctx_indices: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Custom blocked-KV gather op.
+    Semantics: same as CtxGatherFuncBlockedKV.forward.
+    """
+    batch_indices = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
+    head_indices = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+    ctx_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+    return data[batch_indices, head_indices, ctx_indices]
+
+
+@ctx_gather_blocked_kv_op.register_fake
+def _(
+    data: torch.Tensor,
+    ctx_indices: torch.Tensor,
+) -> torch.Tensor:
+    batch_size = data.shape[0]
+    num_heads = data.shape[1]
+    seq_len = ctx_indices.shape[2]
+    feature_shape = data.shape[3:]
+    out_shape = (batch_size, num_heads, seq_len, *feature_shape)
+    return torch.empty(out_shape, dtype=data.dtype, device=data.device)
 
 
 # SCATTER CB (4D with heads, context, etc.)
@@ -159,6 +193,7 @@ def ctx_gather_cb_op(
     data: torch.Tensor,
     batch_index: torch.Tensor,
     ctx_indices: torch.Tensor,
+    comp_ctx_len: int,
 ) -> torch.Tensor:
     """
     Custom 4D context gather op with batch_index (CB version).
@@ -174,6 +209,7 @@ def _(
     data: torch.Tensor,
     batch_index: torch.Tensor,
     ctx_indices: torch.Tensor,
+    comp_ctx_len: int,
 ) -> torch.Tensor:
     """
     Fake implementation for torch.export.
@@ -186,11 +222,42 @@ def _(
     """
     batch_size = batch_index.shape[0]
     num_heads = data.shape[1]
-    seq_len = ctx_indices.shape[1]
+    seq_len = comp_ctx_len
 
     # Remaining feature dimensions (e.g., head_dim or more)
     feature_shape = data.shape[3:]  # could be () if 3D
 
+    out_shape = (batch_size, num_heads, seq_len, *feature_shape)
+    return torch.empty(out_shape, dtype=data.dtype, device=data.device)
+
+
+# GATHER BLOCKED KV CB
+@torch.library.custom_op("qefficient::ctx_gather_blocked_kv_cb", mutates_args=())
+def ctx_gather_blocked_kv_cb_op(
+    data: torch.Tensor,
+    batch_index: torch.Tensor,
+    ctx_indices: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Custom blocked-KV gather op with batch index.
+    Semantics: same as CtxGatherFuncBlockedKVCB.forward.
+    """
+    batch_indices = batch_index.view(-1, 1, 1)
+    head_indices = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+    ctx_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+    return data[batch_indices, head_indices, ctx_indices]
+
+
+@ctx_gather_blocked_kv_cb_op.register_fake
+def _(
+    data: torch.Tensor,
+    batch_index: torch.Tensor,
+    ctx_indices: torch.Tensor,
+) -> torch.Tensor:
+    batch_size = batch_index.shape[0]
+    num_heads = data.shape[1]
+    seq_len = ctx_indices.shape[2]
+    feature_shape = data.shape[3:]
     out_shape = (batch_size, num_heads, seq_len, *feature_shape)
     return torch.empty(out_shape, dtype=data.dtype, device=data.device)
 

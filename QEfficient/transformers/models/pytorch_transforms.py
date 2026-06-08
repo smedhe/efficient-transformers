@@ -276,7 +276,6 @@ from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     Qwen3VLMoeVisionBlock,
     Qwen3VLMoeVisionModel,
 )
-
 from transformers.models.starcoder2.modeling_starcoder2 import (
     Starcoder2Attention,
     Starcoder2DecoderLayer,
@@ -309,7 +308,6 @@ from QEfficient.customop import CustomRMSNormAIC, GemmaCustomRMSNormAIC
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP, PooledModel, validate_user_pooling_function
 from QEfficient.transformers.models.bert.modeling_bert import (
     QEffBertModel,
-    QEffRobertaModel,
     QEffXLMRobertaModel,
 )
 from QEfficient.transformers.models.codegen.modeling_codegen import (
@@ -356,7 +354,6 @@ from QEfficient.transformers.models.gemma3.modeling_gemma3 import (
     QEffGemma3ForCausalLMModel,
     QEffGemma3ForConditionalGeneration,
     QEffGemma3TextModel,
-    QEffSiglipEncoderLayer,
 )
 from QEfficient.transformers.models.gemma4.modeling_gemma4 import (
     QEffGemma4CustomRMSNormAIC,
@@ -547,7 +544,7 @@ from QEfficient.transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     QEffQwen2_5_VLModel,
     QEffQwen2_5_VLTextModel,
     QEffQwen2_5_VLVisionAttention,
-    QEffQwen2_5_VLVisionBlock,
+    QEffQwen2_5_VLVisionBlockRegion,
     QEffQwen_2_5_vl_DecoderWrapper,
     QEffQwen_2_5_vl_ForConditionalGeneration,
 )
@@ -891,7 +888,7 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen2_5_VLDecoderLayer: QEffQwen2_5_VLDecoderLayer,
         Qwen2_5_VisionTransformerPretrainedModel: QEffQwen2_5_VisionTransformerPretrainedModel,
         Qwen2_5_VLVisionAttention: QEffQwen2_5_VLVisionAttention,
-        Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlock,
+        # Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlock,
         Qwen2_5_VLTextModel: QEffQwen2_5_VLTextModel,
         # Starcoder2
         Starcoder2Attention: QEffStarcoder2Attention,
@@ -924,7 +921,7 @@ class KVCacheTransform(ModuleMappingTransform):
         Llama4VisionEncoderLayer: QEffLlama4VisionEncoderLayer,
         MllamaVisionEncoderLayer: QEffMllamaVisionEncoderLayer,
         PixtralAttentionLayer: QEffPixtralAttentionLayer,
-        Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlock,
+        Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlockRegion,
         Qwen3VLVisionBlock: QEffQwen3VLVisionBlock,
         Qwen3VLMoeVisionBlock: QEffQwen3VLMoeVisionBlock,
         # SiglipEncoderLayer: QEffSiglipEncoderLayer,
@@ -1332,6 +1329,22 @@ def get_decoder_layer_classes_for_export(model: nn.Module) -> set:
     Dynamically determine which DecoderLayer classes should be exported as functions
     based on the model's architecture using the existing KVCacheTransform mapping.
     """
+    # Allow model-specific override for nested subfunction extraction.
+    get_submodules_for_export = getattr(model, "get_submodules_for_export", None)
+    if get_submodules_for_export is not None:
+        try:
+            submodule_classes = get_submodules_for_export()
+            if submodule_classes:
+                if isinstance(submodule_classes, (set, list, tuple)):
+                    candidates = submodule_classes
+                else:
+                    candidates = [submodule_classes]
+                normalized = {cls for cls in candidates if isinstance(cls, type) and issubclass(cls, nn.Module)}
+                if normalized:
+                    return normalized
+        except Exception:
+            pass
+
     # Define patterns that identify decoder layer classes
     DECODER_LAYER_PATTERNS = ["DecoderLayer", "Block", "Layer"]
 
@@ -1346,8 +1359,9 @@ def get_decoder_layer_classes_for_export(model: nn.Module) -> set:
 
     # Filter to only include classes that are actually used in the current model
     model_decoder_classes = set()
+    decoder_layer_bases = tuple(decoder_layer_classes)
     for module in model.modules():
-        if module.__class__ in decoder_layer_classes:
+        if decoder_layer_bases and isinstance(module, decoder_layer_bases):
             model_decoder_classes.add(module.__class__)
 
     return model_decoder_classes

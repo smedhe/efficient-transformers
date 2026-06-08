@@ -6,11 +6,11 @@
 # -----------------------------------------------------------------------------
 
 
+import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils.run_utils import ApiRunner
-import torch
 
 # model_name = "openai/gpt-oss-20b"
 model_name = "meta-llama/Llama-3.2-1B"
@@ -21,7 +21,7 @@ model_name = "meta-llama/Llama-3.2-1B"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 config = AutoConfig.from_pretrained(model_name)
 config.num_hidden_layers = 2
-config.torch_dtype=torch.float32
+config.torch_dtype = torch.float32
 print(config)
 runner = ApiRunner(
     batch_size=1,
@@ -46,7 +46,12 @@ ort_inputs = runner.input_handler.prepare_ort_inputs()
 ort_tokens = runner.run_kv_model_on_ort(onnx_path)
 print(ort_tokens)
 
-qeff_model.compile(prefill_seq_len=8, ctx_len=32,  use_dynamo=False, use_onnx_subfunctions=True,)
+qeff_model.compile(
+    prefill_seq_len=8,
+    ctx_len=32,
+    use_dynamo=False,
+    use_onnx_subfunctions=True,
+)
 print("compile done")
 print("QEff Transformed Onnx Model Outputs(AIC Backend)")
 output = qeff_model.generate(prompts=["My name is"], tokenizer=tokenizer, automation=True)
