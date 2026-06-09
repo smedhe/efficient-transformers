@@ -125,7 +125,7 @@ def get_decoder_layer_classes_for_export(model):
     if get_submodules_for_export is not None:
         try:
             submodule_classes = get_submodules_for_export()
-            if submodule_classes:
+            if submodule_classes is not None:
                 return {cls for cls in submodule_classes if inspect.isclass(cls)}
         except Exception as exc:
             logger.warning(

@@ -31,7 +31,11 @@ def eager_attention_forward(module, query, key, value, attention_mask, head_mask
     if not module.is_cross_attention:
         # if only "normal" attention layer implements causal mask
         query_length, key_length = query.size(-2), key.size(-2)
-        causal_mask = module.bias[:, :, key_length - query_length : key_length, :key_length]
+        # module.bias was removed in newer transformers; build causal mask via index comparison
+        # (avoids tril which emits a Trilu op unsupported by the AIC compiler)
+        q_idx = torch.arange(key_length - query_length, key_length, device=query.device).unsqueeze(1)
+        k_idx = torch.arange(key_length, device=query.device).unsqueeze(0)
+        causal_mask = (k_idx <= q_idx).view(1, 1, query_length, key_length)
         # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
         # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
         mask_value = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE)

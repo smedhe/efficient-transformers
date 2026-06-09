@@ -3367,9 +3367,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                             )
                         else:
                             dim_registry[dim_name] = Dim.DYNAMIC
-
                     input_dynamic_shapes[axis_idx] = dim_registry[dim_name]
-
                 dynamic_shapes[input_name] = input_dynamic_shapes
 
         # Handle past_key_values specially - collect all past_key.X and past_value.X

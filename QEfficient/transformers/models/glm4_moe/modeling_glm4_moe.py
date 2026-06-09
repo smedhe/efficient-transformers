@@ -237,9 +237,8 @@ def eager_attention_forward(
 
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
     if attention_mask is not None:
-        attn_weights = torch.where(
-            attention_mask, torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=key_states.dtype), attn_weights
-        )
+        masked_fill = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE)
+        attn_weights = torch.where(attention_mask, masked_fill, attn_weights)
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=key_states.dtype).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -349,8 +348,10 @@ class QEffGlm4MoeAttention(Glm4MoeAttention):
 
         if sin_cached is not None and cos_cached is not None:
             sin, cos = sin_cached, cos_cached
-            rotary_dim = int(self.rotary_emb.cos_cached.shape[-1])
-            query_states, key_states = qeff_apply_precomputed_rotary_pos_emb(
+            # partial_rotary_factor = self.config.rope_parameters.get("partial_rotary_factor", 1.0)
+            # rotary_dim = int(self.head_dim * partial_rotary_factor)
+            rotary_dim = int(self.rotary_emb.cos_cached.detach().clone().shape[-1]) 
+            query_states, key_states= qeff_apply_precomputed_rotary_pos_emb(
                 query_states, key_states, cos, sin, rotary_dim
             )
         else:
@@ -595,7 +596,6 @@ class QEffGlm4MoeTopkRouter(nn.Module):
     def forward(self, hidden_states):
         # orig_i, orig_w = self.orig_forward(hidden_states)
         hidden_states = hidden_states.view(-1, self.config.hidden_size)
-        # import ipdb; ipdb.set_trace()c
 
         # router_logits = torch.nn.functional.linear(hidden_states.type(torch.float32), self.weight.type(torch.float32))
         router_logits = torch.nn.functional.linear(hidden_states, self.weight)

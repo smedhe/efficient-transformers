@@ -109,8 +109,9 @@ class QEffDynamicLayer(CacheLayerMixin):
             self.device = reference_states.device
             self.is_initialized = True
 
-    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
-        return self.get_seq_length() + cache_position.shape[0], 0
+    def get_mask_sizes(self, cache_position) -> tuple[int, int]:
+        q_len = cache_position if isinstance(cache_position, int) else cache_position.shape[0]
+        return self.get_seq_length() + q_len, 0
 
     def get_seq_length(self) -> int:
         return self.keys.shape[-2] if self.keys is not None else 0
@@ -862,6 +863,7 @@ class QEffHybridCache(HybridCache):
             len(self.key_cache) == 0  # no cache in any layer
             or len(self.key_cache) <= layer_idx  # skipped `layer_idx` and hasn't run a layer with cache after it
             or len(self.key_cache[layer_idx]) == 0  # the layer has no cache
+            
         )
         layer_seq_length = self.key_cache[layer_idx].shape[-2] if not is_empty_layer else 0
         return layer_seq_length
@@ -1184,7 +1186,10 @@ class QEffSlidingWindowCache:
             batch_index = cache_kwargs.get("batch_index", None)  # Check and fetch batch index value from the kwargs
 
             if is_sliding_layer:
-                sliding_window_len = self.key_cache[layer_idx].shape[2]
+                # Use the fixed sliding_window_len from __init__ (a Python int) rather
+                # than reading shape[2] from the cache tensor, which becomes a SymInt
+                # during materialize_as_graph tracing and leaks as an extra graph input.
+                sliding_window_len = self.sliding_window_len
                 # Avoid integer remainder lowering to sign/mod handling in ONNX decode.
                 # safe_position_ids = torch.where(position_ids < 0, torch.zeros_like(position_ids), position_ids)
                 # divisor = torch.scalar_tensor(
@@ -1287,11 +1292,21 @@ class QEffHybridCacheForGPTOSS:
     ) -> "HybridCache":
         """Converts a cache in the legacy cache format into an equivalent `DynamicCache`. Used for
         backward compatibility."""
+        # Read sliding_window_len from config (Python int, not from tensor shape)
+        # to avoid SymInt cross-contamination during torch.export tracing.
+        sliding_window_len = getattr(config, "sliding_window", past_key_values[0][0].shape[2])
+        layer_types = getattr(config, "layer_types", [])
+        if layer_types:
+            # Find first full-attention layer to read max_cache_len from
+            full_idx = next((i for i, lt in enumerate(layer_types) if lt != "sliding_attention"), 1)
+            max_cache_len = past_key_values[full_idx][0].shape[2]
+        else:
+            max_cache_len = past_key_values[1][0].shape[2]
         cache = cls(
             config,
             batch_size=past_key_values[0][0].shape[0],
-            max_cache_len=past_key_values[1][0].shape[2],
-            sliding_window_len=past_key_values[0][0].shape[2],
+            max_cache_len=max_cache_len,
+            sliding_window_len=sliding_window_len,
         )
         if past_key_values is not None:
             for layer_idx in range(len(past_key_values)):
@@ -1339,7 +1354,9 @@ class QEffHybridCacheForGPTOSS:
         else:
             position_ids = cache_kwargs.get("position_ids")
             is_sliding_layer = cache_kwargs.get("is_sliding")
-            _, _, ctx_len, _ = self.key_cache[layer_idx].shape
+            # Use stored Python ints instead of shape[2] to avoid SymInt leaking as
+            # a separate graph input during materialize_as_graph FakeTensor tracing.
+            ctx_len = self.sliding_window_len if is_sliding_layer else self.max_cache_len
             batch_index = cache_kwargs.get("batch_index", None)  # Check and fetch batch index value form the kwargs
 
             if is_sliding_layer:

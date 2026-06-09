@@ -490,7 +490,7 @@ class QEffGptOssMLP(GptOssMLP):
             .view(-1, 1, self.experts.hidden_size)
         )
 
-        expert_in = expert_in.to(gate_proj.dtype)
+        # Apply gate and up projections separately using bmm
         gate = torch.bmm(expert_in, gate_proj) + gate_proj_bias.unsqueeze(1)
         up = torch.bmm(expert_in, up_proj) + up_proj_bias.unsqueeze(1)
 
@@ -503,7 +503,6 @@ class QEffGptOssMLP(GptOssMLP):
         gated_output = (up + 1) * glu
 
         # Down projection
-        gated_output = gated_output.to(down_proj.dtype)
         experts_out = torch.bmm(gated_output, down_proj) + down_proj_bias.unsqueeze(1)
         experts_out = experts_out.view(bs * seq_len, self.router.top_k, self.experts.hidden_size)
 
@@ -683,9 +682,10 @@ def eager_attention_forward(
     value_states = repeat_kv(value, module.num_key_value_groups)
 
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    
     if attention_mask is not None:
-        masked_fill = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=torch.float32)
-        attn_weights = torch.where(attention_mask, masked_fill, attn_weights)
+            masked_fill = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE)
+            attn_weights = torch.where(attention_mask, masked_fill, attn_weights)
 
     sinks = module.sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
     combined_logits = torch.cat([attn_weights, sinks], dim=-1)
@@ -831,6 +831,9 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
+        # Read sliding_window once as a local Python constant so materialize_as_graph
+        # does not lift repeated self.sliding_window attribute accesses as a SymInt input.
+        sliding_window = self.sliding_window
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         hidden_shape = (*input_shape, -1, self.head_dim)
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
@@ -845,10 +848,10 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
                 "batch_index": batch_index,
                 "position_ids": position_ids,
                 "config": self.config,
-                "is_sliding": self.sliding_window is not None,
-                "sliding_window": self.sliding_window,
+                "is_sliding": sliding_window is not None,
+                "sliding_window": sliding_window,
             }
-            if self.sliding_window is not None:
+            if sliding_window is not None:
                 key_states, value_states = past_key_values.sliding_window_update_chunked(
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
@@ -860,15 +863,12 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
 
-        if self.sliding_window is not None:
+        if sliding_window is not None:
             attention_mask = sliding_mask
-            # positive_pos_ids = torch.where(position_ids<0, 0, position_ids)
-            ctx_len = position_ids.shape[1] + self.sliding_window
+            ctx_len = position_ids.shape[1] + sliding_window
             ctx_indices = torch.arange(ctx_len)
             first_pos_idx = position_ids[0][0]
-            add_idx = torch.where(first_pos_idx >= self.sliding_window, first_pos_idx - self.sliding_window, 0)
-            # start_idx = torch.where(first_pos_idx>=self.sliding_window, first_pos_idx-self.sliding_window, 0)
-            # end_idx = torch.where(first_pos_idx >= self.sliding_window, first_pos_idx+position_ids.shape[1], position_ids.shape[1]+self.sliding_window)
+            add_idx = torch.where(first_pos_idx >= sliding_window, first_pos_idx - sliding_window, 0)
             ctx_indices += add_idx
             attention_mask = attention_mask[:, :, :, ctx_indices]
         else:
@@ -883,7 +883,7 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
-            sliding_window=self.sliding_window,
+            sliding_window=sliding_window,
             s_aux=self.sinks,  # diff with Llama
             **kwargs,
         )
@@ -961,7 +961,7 @@ class QEffPrefillOnlyGptOssAttention(GptOssAttention):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
-            sliding_window=self.sliding_window,
+            sliding_window=sliding_window,
             s_aux=self.sinks,  # diff with Llama
             **kwargs,
         )
@@ -991,7 +991,6 @@ class QEffGptOssAttention(GptOssAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
@@ -1082,13 +1081,14 @@ class QEffGptOssDecoderLayer(GptOssDecoderLayer):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
-        hidden_states, self_attn_weights, _ = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_value,
             comp_ctx_lengths=comp_ctx_lengths,
             batch_index=batch_index,
+            use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
             sliding_mask=sliding_mask,
@@ -1109,6 +1109,9 @@ class QEffGptOssDecoderLayer(GptOssDecoderLayer):
         if output_attentions:
             outputs += (self_attn_weights,)
 
+        if use_cache:
+            outputs += (present_key_value,)
+
         return outputs
 
 
@@ -1120,16 +1123,15 @@ class QEffGptOssFullDecoderLayer(QEffGptOssDecoderLayer):
     """Full-attention decoder layer marker class for subfunction extraction."""
 
 
-def _is_gpt_oss_sliding_layer_type(layer_type) -> bool:
-    layer_type_str = str(layer_type).lower()
-    return layer_type_str in {"sliding_attention", "sliding", "sliding_window_attention"}
+def _is_gpt_oss_sliding_layer_type(layer_type: str) -> bool:
+    return str(layer_type).lower() in {"sliding_attention", "sliding", "sliding_window_attention"}
 
 
-def _get_gpt_oss_decoder_export_class(layer_type) -> Type[QEffGptOssDecoderLayer]:
+def _get_gpt_oss_decoder_export_class(layer_type: str) -> type:
     return QEffGptOssSlidingDecoderLayer if _is_gpt_oss_sliding_layer_type(layer_type) else QEffGptOssFullDecoderLayer
 
 
-def _collect_gpt_oss_decoder_export_classes(model) -> set[type[QEffGptOssDecoderLayer]]:
+def _collect_gpt_oss_decoder_export_classes(model) -> set:
     classes = set()
     for layer in getattr(model, "layers", []):
         if isinstance(layer, QEffGptOssDecoderLayer):
@@ -1137,40 +1139,25 @@ def _collect_gpt_oss_decoder_export_classes(model) -> set[type[QEffGptOssDecoder
     return classes
 
 
-def _collect_gpt_oss_decoder_marker_classes_from_config(config) -> set[type[QEffGptOssDecoderLayer]]:
+def _collect_gpt_oss_decoder_marker_classes_from_config(config) -> set:
     marker_classes = set()
     for layer_type in getattr(config, "layer_types", []) or []:
         marker_classes.add(_get_gpt_oss_decoder_export_class(layer_type))
     return marker_classes
 
 
-def _assign_gpt_oss_decoder_layer_export_classes(model) -> set[type[QEffGptOssDecoderLayer]]:
-    """
-    Split GPT-OSS decoder layers into homogeneous classes (sliding/full) so
-    repeated subfunction extraction sees stable per-class schemas.
-    """
+def _assign_gpt_oss_decoder_layer_export_classes(model) -> set:
+    """Re-assign each decoder layer's __class__ to the sliding or full marker class
+    so repeated-subgraph extraction produces two distinct ONNX functions."""
     layer_types = getattr(model.config, "layer_types", None)
     layers = getattr(model, "layers", None)
     if not layer_types or layers is None:
         return _collect_gpt_oss_decoder_export_classes(model)
 
     for idx, decoder_layer in enumerate(layers):
-        if idx >= len(layer_types):
-            break
-        if not isinstance(decoder_layer, QEffGptOssDecoderLayer):
-            continue
-        target_cls = _get_gpt_oss_decoder_export_class(layer_types[idx])
-        if decoder_layer.__class__ is target_cls:
-            continue
-        try:
-            decoder_layer.__class__ = target_cls
-        except TypeError as exc:
-            logger.warning(
-                "Failed to assign GPT-OSS decoder layer export class at idx=%s to %s: %s",
-                idx,
-                target_cls.__name__,
-                exc,
-            )
+        if idx < len(layer_types) and isinstance(decoder_layer, QEffGptOssDecoderLayer):
+            decoder_layer.__class__ = _get_gpt_oss_decoder_export_class(layer_types[idx])
+
     return _collect_gpt_oss_decoder_export_classes(model)
 
 
@@ -1179,7 +1166,6 @@ class QEffPrefillOnlyGptOssModel(GptOssModel):
         self.rotary_emb = QEffGptOssRotaryEmbedding(config=self.config)
         self.sin_cached = torch.nn.Parameter(self.rotary_emb.sin_cached * self.rotary_emb.attention_scaling)
         self.cos_cached = torch.nn.Parameter(self.rotary_emb.cos_cached * self.rotary_emb.attention_scaling)
-        _assign_gpt_oss_decoder_layer_export_classes(self)
 
     def forward(
         self,
@@ -1280,7 +1266,6 @@ class QEffGptOssModel(GptOssModel):
         self.rotary_emb = QEffGptOssRotaryEmbedding(config=self.config)
         self.sin_cached = torch.nn.Parameter(self.rotary_emb.sin_cached * self.rotary_emb.attention_scaling)
         self.cos_cached = torch.nn.Parameter(self.rotary_emb.cos_cached * self.rotary_emb.attention_scaling)
-        _assign_gpt_oss_decoder_layer_export_classes(self)
 
     def forward(
         self,
@@ -1329,7 +1314,7 @@ class QEffGptOssModel(GptOssModel):
         causal_mask = _create_causal_mask(position_ids=position_ids, target_length=past_key_values.max_cache_len)
         sliding_mask = _create_causal_mask(
             position_ids=position_ids,
-            target_length=past_key_values.sliding_window_len,
+            target_length=past_key_values.max_cache_len,
             sliding_window=past_key_values.sliding_window_len,
         )
 
@@ -1358,7 +1343,6 @@ class QEffGptOssModel(GptOssModel):
                 sliding_mask=sliding_mask,
                 sin_cached=sin,
                 cos_cached=cos,
-                **kwargs,
             )
             hidden_states = layer_outputs[0]
 
@@ -1388,19 +1372,16 @@ class QEffGptOssForCausalLM(GptOssForCausalLM):
             This method should return the *class object* (not an instance).
             Downstream code can use this to find/build subfunctions for repeated blocks.
         """
-        # Keep layer runtime classes deterministic for nested compile/subfunction export.
+        # Re-assign layer classes so each type gets its own invoke_subgraph schema.
         _assign_gpt_oss_decoder_layer_export_classes(self.model)
 
-        # Prefer marker classes derived from config so invoke_subgraph/function naming
-        # is stable across export runs, even if only one type is active in a tiny model.
+        # Prefer config-derived marker classes for stable naming across runs.
         marker_classes = _collect_gpt_oss_decoder_marker_classes_from_config(self.config)
         if marker_classes:
             return marker_classes
 
-        assigned_classes = _collect_gpt_oss_decoder_export_classes(self.model)
-        if assigned_classes:
-            return assigned_classes
-        return {QEffGptOssSlidingDecoderLayer, QEffGptOssFullDecoderLayer}
+        assigned = _collect_gpt_oss_decoder_export_classes(self.model)
+        return assigned if assigned else {QEffGptOssSlidingDecoderLayer, QEffGptOssFullDecoderLayer}
 
     def forward(
         self,
