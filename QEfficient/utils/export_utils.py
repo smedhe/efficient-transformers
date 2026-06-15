@@ -163,31 +163,53 @@ def export_wrapper(func):
     """
 
     def wrapper(self, *args, **kwargs):
+        # Extract flags
         use_dynamo = kwargs.get("use_dynamo", False)
         requested_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
         use_onnx_subfunctions = requested_subfunctions
 
+        # Cache probe flag (used for layerwise inspection runs)
+        cache_probe = kwargs.pop("_layerwise_cache_probe", False)
+
+        # Default context managers and state trackers
         export_context = nullcontext()
         subfunction_setup_done = False
+
         decoder_layer_classes = get_decoder_layer_classes_for_export(self.model)
+
         try:
             # 1. Setup the requested export mode
             if use_onnx_subfunctions:
                 args, kwargs = _setup_onnx_subfunctions(self, args, kwargs)
                 subfunction_setup_done = True
+
+                # Enable nested compile regions when using dynamo + subfunctions
                 if use_dynamo and decoder_layer_classes:
-                    export_context = temporarily_enable_nested_compile_regions(self.model, decoder_layer_classes)
+                    export_context = temporarily_enable_nested_compile_regions(
+                        self.model, decoder_layer_classes
+                    )
+
             elif use_dynamo:
-                export_context = temporarily_disable_nested_compile_regions(self.model, decoder_layer_classes)
+                # Disable nested compile regions for standard dynamo export
+                export_context = temporarily_disable_nested_compile_regions(
+                    self.model, decoder_layer_classes
+                )
 
             # 2. Prepare export directory
             export_dir = _prepare_export_directory(self, kwargs)
 
             # 3. Generate hash and finalize export directory path
-            export_hash, filtered_hash_params = _generate_export_hash(self, args, kwargs, func)
+            export_hash, filtered_hash_params = _generate_export_hash(
+                self, args, kwargs, func
+            )
             export_dir = export_dir.with_name(export_dir.name + "-" + export_hash)
+
             kwargs["export_dir"] = export_dir
             self.export_hash = export_hash
+
+            # Re-inject cache probe flag if needed
+            if cache_probe:
+                kwargs["_layerwise_cache_probe"] = True
 
             # 4. Execute the actual export
             try:
@@ -201,25 +223,33 @@ def export_wrapper(func):
                     # leaving CtxScatter nodes at top level with _RetainedState
                     # input names that the ORT runner doesn't know to feed.
                     dynamo_patch = (
-                        torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
+                        torch._dynamo.config.patch(
+                            inline_single_use_invoke_subgraph=False
+                        )
                         if use_onnx_subfunctions and use_dynamo
                         else nullcontext()
                     )
+
                     with dynamo_patch:
                         onnx_path = func(self, *args, **kwargs)
+
             except Exception as export_exc:
                 if use_onnx_subfunctions and use_dynamo and decoder_layer_classes:
                     raise RuntimeError(
-                        "Export failed with use_dynamo=True and use_onnx_subfunctions=True while nested compile "
-                        f"regions were enabled for repeated-subgraph extraction ({type(export_exc).__name__}: "
-                        f"{export_exc}). Retry export with use_onnx_subfunctions=False for this model/runtime."
+                        "Export failed with use_dynamo=True and use_onnx_subfunctions=True "
+                        "while nested compile regions were enabled for repeated-subgraph "
+                        f"extraction ({type(export_exc).__name__}: {export_exc}). "
+                        "Retry export with use_onnx_subfunctions=False for this model/runtime."
                     ) from export_exc
                 else:
                     raise
 
-            # 5. Save export metadata
-            _save_export_metadata(export_dir, filtered_hash_params)
+            # 5. Save export metadata (skip when running cache probe)
+            if not cache_probe:
+                _save_export_metadata(export_dir, filtered_hash_params)
+
             return onnx_path
+
         finally:
             # 6. Always cleanup subfunctions if they were setup
             if subfunction_setup_done:
@@ -268,6 +298,10 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     bound_args = new_sig.bind(*args, **kwargs)
     bound_args.apply_defaults()
     all_args = bound_args.arguments
+    if func.__name__ == "_export_layerwise":
+        export_kwargs = dict(all_args.get("export_kwargs") or {})
+        export_kwargs["_qeff_layerwise_export"] = True
+        all_args["export_kwargs"] = export_kwargs
 
     # Use the model's current configuration for hashing to ensure any post-load modifications are captured
     # TODO: Replace with get_model_config property of modeling classes and remove the if-else
