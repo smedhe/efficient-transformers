@@ -163,67 +163,95 @@ def export_wrapper(func):
     """
 
     def wrapper(self, *args, **kwargs):
+        # Extract flags
         use_dynamo = kwargs.get("use_dynamo", False)
-        requested_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
-        use_onnx_subfunctions = requested_subfunctions
+        use_onnx_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
 
+        # Cache probe flag (used for layerwise inspection runs)
+        cache_probe = kwargs.pop("_layerwise_cache_probe", False)
+
+        # Default context managers and state trackers
         export_context = nullcontext()
-        subfunction_setup_done = False
-        decoder_layer_classes = get_decoder_layer_classes_for_export(self.model)
+        subfunction_state = None
+
+        # 1. Setup the requested export mode
+        if use_onnx_subfunctions:
+            if use_dynamo:
+                # Path 4: dynamo + subfunctions.
+                # The @nested_compile_region decorator is already statically present
+                # on each decoder layer's forward() method — dynamo will naturally
+                # emit repeated_subgraph* functions without any dynamic patching.
+                # Derive target_classnames directly from get_submodules_for_export()
+                # on the model so RenameRepeatedSubgraphTransform can rename them.
+                submodule_classes = getattr(self.model, "get_submodules_for_export", lambda: set())()
+                target_classnames = sorted(cls.__name__ for cls in (submodule_classes or []))
+                args, kwargs, subfunction_state = _setup_onnx_subfunctions(
+                    self, args, kwargs, target_classnames=target_classnames
+                )
+            else:
+                # Path 2: TorchScript + subfunctions.
+                args, kwargs, subfunction_state = _setup_onnx_subfunctions(self, args, kwargs)
+
+        elif use_dynamo:
+            # Path 3: flat dynamo — strip any @nested_compile_region decorators that
+            # are statically present on decoder layer forward() methods so they don't
+            # create subgraph boundaries during tracing.
+            # target_classes=None: the function identifies wrapped methods by qualname,
+            # no class filter needed.
+            export_context = temporarily_disable_nested_compile_regions(self.model, target_classes=None)
+
+        # 2. Prepare export directory
+        export_dir = _prepare_export_directory(self, kwargs)
+
+        # 3. Generate hash and finalize export directory path
+        export_hash, filtered_hash_params = _generate_export_hash(self, args, kwargs, func)
+        export_dir = export_dir.with_name(export_dir.name + "-" + export_hash)
+        kwargs["export_dir"] = export_dir
+        self.export_hash = export_hash
+
+        # Re-inject cache probe flag if needed
+        if cache_probe:
+            kwargs["_layerwise_cache_probe"] = True
+
         try:
-            # 1. Setup the requested export mode
-            if use_onnx_subfunctions:
-                args, kwargs = _setup_onnx_subfunctions(self, args, kwargs)
-                subfunction_setup_done = True
-                if use_dynamo and decoder_layer_classes:
-                    export_context = temporarily_enable_nested_compile_regions(self.model, decoder_layer_classes)
-            elif use_dynamo:
-                export_context = temporarily_disable_nested_compile_regions(self.model, decoder_layer_classes)
-
-            # 2. Prepare export directory
-            export_dir = _prepare_export_directory(self, kwargs)
-
-            # 3. Generate hash and finalize export directory path
-            export_hash, filtered_hash_params = _generate_export_hash(self, args, kwargs, func)
-            export_dir = export_dir.with_name(export_dir.name + "-" + export_hash)
-            kwargs["export_dir"] = export_dir
-            self.export_hash = export_hash
-
             # 4. Execute the actual export
+            # For the dynamo+subfunctions path each decoder layer must be
+            # preserved as a repeated_subgraph ONNX function so that
+            # PreserveNestedCacheRetainedStateTransform can rename the
+            # _RetainedState inputs to plain past_key.X / past_value.X.
+            # The default inline_single_use_invoke_subgraph=True would
+            # inline single-use layers before the ONNX translation,
+            # leaving CtxScatter nodes at top level with _RetainedState
+            # input names that the ORT runner doesn't know to feed.
+            dynamo_patch = (
+                torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
+                if use_onnx_subfunctions and use_dynamo
+                else nullcontext()
+            )
             try:
                 with export_context:
-                    # For the dynamo+subfunctions path each decoder layer must be
-                    # preserved as a repeated_subgraph ONNX function so that
-                    # PreserveNestedCacheRetainedStateTransform can rename the
-                    # _RetainedState inputs to plain past_key.X / past_value.X.
-                    # The default inline_single_use_invoke_subgraph=True would
-                    # inline single-use layers before the ONNX translation,
-                    # leaving CtxScatter nodes at top level with _RetainedState
-                    # input names that the ORT runner doesn't know to feed.
-                    dynamo_patch = (
-                        torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
-                        if use_onnx_subfunctions and use_dynamo
-                        else nullcontext()
-                    )
                     with dynamo_patch:
                         onnx_path = func(self, *args, **kwargs)
             except Exception as export_exc:
-                if use_onnx_subfunctions and use_dynamo and decoder_layer_classes:
+                if use_onnx_subfunctions and use_dynamo:
                     raise RuntimeError(
-                        "Export failed with use_dynamo=True and use_onnx_subfunctions=True while nested compile "
-                        f"regions were enabled for repeated-subgraph extraction ({type(export_exc).__name__}: "
-                        f"{export_exc}). Retry export with use_onnx_subfunctions=False for this model/runtime."
+                        "Export failed with use_dynamo=True and use_onnx_subfunctions=True "
+                        "while nested compile regions were enabled for repeated-subgraph "
+                        f"extraction ({type(export_exc).__name__}: {export_exc}). "
+                        "Retry export with use_onnx_subfunctions=False for this model/runtime."
                     ) from export_exc
-                else:
-                    raise
+                raise
 
-            # 5. Save export metadata
-            _save_export_metadata(export_dir, filtered_hash_params)
-            return onnx_path
+            # 5. Save export metadata (skip when running cache probe)
+            if not cache_probe:
+                _save_export_metadata(export_dir, filtered_hash_params)
+
         finally:
             # 6. Always cleanup subfunctions if they were setup
-            if subfunction_setup_done:
-                _cleanup_onnx_subfunctions(self)
+            if use_onnx_subfunctions:
+                _cleanup_onnx_subfunctions(self, subfunction_state)
+
+        return onnx_path
 
     return wrapper
 
@@ -268,6 +296,10 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     bound_args = new_sig.bind(*args, **kwargs)
     bound_args.apply_defaults()
     all_args = bound_args.arguments
+    if func.__name__ == "_export_layerwise":
+        export_kwargs = dict(all_args.get("export_kwargs") or {})
+        export_kwargs["_qeff_layerwise_export"] = True
+        all_args["export_kwargs"] = export_kwargs
 
     # Use the model's current configuration for hashing to ensure any post-load modifications are captured
     # TODO: Replace with get_model_config property of modeling classes and remove the if-else
