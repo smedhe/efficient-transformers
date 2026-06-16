@@ -358,12 +358,29 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
 
 
 class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
-    """Rename dynamo repeated_subgraph function names to model-specific layer class names."""
+    """Rename dynamo repeated_subgraph function names to model-specific layer class names.
+
+    Discovers target class names by calling get_submodules_for_export on the pytorch_model
+    kwarg, so the dynamo export path stays disentangled from get_decoder_layer_classes_for_export.
+    """
 
     _REPEATED_SUBGRAPH_RE = re.compile(r"^repeated_subgraph(\d+)$")
 
     @classmethod
-    def apply(cls, model: ModelProto, target_classnames: Optional[List[str]] = None, **kwargs) -> bool:
+    def apply(
+        cls,
+        model: ModelProto,
+        pytorch_model=None,
+        target_classnames: Optional[List[str]] = None,
+        **kwargs,
+    ) -> bool:
+        if not target_classnames and pytorch_model is not None:
+            from QEfficient.utils.export_utils import get_decoder_layer_classes_for_export
+
+            classes = get_decoder_layer_classes_for_export(pytorch_model)
+            if classes:
+                target_classnames = sorted(c.__name__ for c in classes)
+
         target_classnames = [name for name in (target_classnames or []) if name]
         if not target_classnames:
             return False
@@ -399,7 +416,7 @@ class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
             if fn.name in old_to_new:
                 fn.name = old_to_new[fn.name]
 
-        def _rename_op_types(nodes: List[onnx.NodeProto]):
+        def _rename_op_types(nodes):
             for node in nodes:
                 if node.op_type in old_to_new:
                     node.op_type = old_to_new[node.op_type]
@@ -857,6 +874,9 @@ class OnnxTransformPipeline(BaseOnnxTransform):
 
         if AdapterWeightsToInputsTransform in requested:
             applied[AdapterWeightsToInputsTransform] = AdapterWeightsToInputsTransform.apply(model, **kwargs)
+
+        if RewriteUnsupportedOpsTransform in requested:
+            applied[RewriteUnsupportedOpsTransform] = RewriteUnsupportedOpsTransform.apply(model)
 
         for t, done in applied.items():
             logger.info(f"Transform '{t.__name__}' applied={done}")

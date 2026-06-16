@@ -28,6 +28,8 @@ def CtxScatter(data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates: 
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2, 3]), exp_shape)
     head_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, num_heads, one), [0, 2, 3]), exp_shape)
+    # batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(ops.Squeeze(zero), ops.Squeeze(batch_size), ops.Squeeze(one)), [1, 2, 3]), exp_shape)
+    # head_idx = ops.Expand(ops.Unsqueeze(ops.Range(ops.Squeeze(zero), ops.Squeeze(num_heads), ops.Squeeze(one)), [0, 2, 3]), exp_shape)
     ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [1, 3]), exp_shape)
     indices = ops.Concat(batch_idx, head_idx, ctx_idx, axis=3)
 
@@ -69,6 +71,7 @@ def CtxScatter3D(data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates
 
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2]), exp_shape)
+    # batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(ops.Squeeze(zero), ops.Squeeze(batch_size), ops.Squeeze(one)), [1, 2]), exp_shape)
 
     # keep index tensor types aligned for backend that require exact dtype match
     batch_idx = ops.Cast(batch_idx, to=onnxscript.INT32.dtype)
@@ -137,6 +140,7 @@ def CtxScatter3DInt(
 
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2]), exp_shape)
+    # batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(ops.Squeeze(zero), ops.Squeeze(batch_size), ops.Squeeze(one)), [1, 2]), exp_shape)
     batch_idx = ops.Cast(batch_idx, to=onnxscript.INT32.dtype)
     ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [2]), exp_shape)
     indices = ops.Concat(batch_idx, ctx_idx, axis=2)
@@ -219,8 +223,11 @@ class CtxGatherFunc3DGeneralized(torch.autograd.Function):
 def CtxGather(
     data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32, comp_ctx_len: onnxscript.INT32
 ) -> onnxscript.FLOAT:
-    # Create a shape tensor based on comp_ctx_len
     shape_tensor = ops.Concat(ops.Shape(data)[:2], ops.Reshape(comp_ctx_len, [1]), axis=0)
+    # # Create a shape tensor based on comp_ctx_len
+    # # Cast comp_ctx_len to INT64 to match ops.Shape() output type before Concat
+    # comp_ctx_len_i64 = ops.Cast(comp_ctx_len, to=onnxscript.INT64.dtype)
+    # shape_tensor = ops.Concat(ops.Shape(data)[:2], ops.Reshape(comp_ctx_len_i64, [1]), axis=0)
 
     # Directly use the shape tensor without validation
     ctx_indices = ops.Expand(ctx_indices, shape_tensor)

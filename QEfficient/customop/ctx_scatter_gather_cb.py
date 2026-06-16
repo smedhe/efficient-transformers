@@ -30,6 +30,7 @@ def CtxScatterCB(
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(batch_index, [2, 3]), exp_shape)
     head_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, num_heads, one), [0, 2, 3]), exp_shape)
+    # head_idx = ops.Expand(ops.Unsqueeze(ops.Range(ops.Squeeze(zero), ops.Squeeze(num_heads), ops.Squeeze(one)), [0, 2, 3]), exp_shape)
     ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [1, 3]), exp_shape)
     indices = ops.Concat(batch_idx, head_idx, ctx_idx, axis=3)
 
@@ -105,8 +106,9 @@ def CtxGatherCB(
 ) -> onnxscript.FLOAT:
     batch_size = ops.Gather(ops.Shape(batch_index), [0])
     num_heads = ops.Gather(ops.Shape(data), [1])
-    # using compute-context-length (CCL) instead of context-length to do gather process based on CCL and later do attention computations based on CCL as well.
     ctx_len = ops.Reshape(comp_ctx_len, [1])
+    # # using compute-context-length (CCL) instead of context-length to do gather process based on CCL and later do attention computations based on CCL as well.
+    # ctx_len = ops.Reshape(ops.Cast(comp_ctx_len, to=onnxscript.INT64.dtype), [1])
 
     # Expanded shape to create indices
     zero = ops.Constant(value_ints=[0])
@@ -119,6 +121,7 @@ def CtxGatherCB(
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(batch_index, [2, 3]), exp_shape)
     head_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, num_heads, one), [0, 2, 3]), exp_shape)
+    # head_idx = ops.Expand(ops.Unsqueeze(ops.Range(ops.Squeeze(zero), ops.Squeeze(num_heads), ops.Squeeze(one)), [0, 2, 3]), exp_shape)
     ctx_idx = ops.Expand(ops.Unsqueeze(ctx_indices, [3]), exp_shape)
     indices = ops.Concat(batch_idx, head_idx, ctx_idx, axis=3)
 
@@ -160,6 +163,7 @@ def CtxGatherBlockedKVCB(
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(batch_index, [2, 3]), exp_shape)
     head_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, num_heads, one), [0, 2, 3]), exp_shape)
+    # head_idx = ops.Expand(ops.Unsqueeze(ops.Range(ops.Squeeze(zero), ops.Squeeze(num_heads), ops.Squeeze(one)), [0, 2, 3]), exp_shape)
     ctx_idx = ops.Expand(ops.Unsqueeze(ctx_indices, [3]), exp_shape)
     indices = ops.Concat(batch_idx, head_idx, ctx_idx, axis=3)
 

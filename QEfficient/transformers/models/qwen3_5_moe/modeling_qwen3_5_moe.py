@@ -57,6 +57,7 @@ from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.custom_op_utils import select_interface
 from QEfficient.utils.logging_utils import logger
 
 # EXPERT_BLOCKING_NUM_NSP = 16
@@ -761,7 +762,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_ctx_indices = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-                conv_state = CtxGatherFuncCB3D.apply(conv_state_all, conv_batch_index, conv_ctx_indices)
+                conv_state = select_interface(CtxGatherFuncCB3D.apply, torch.ops.qefficient.ctx_gather_cb_3d)(
+                    conv_state_all, conv_batch_index, conv_ctx_indices
+                )
 
                 recurrent_batch_index = (batch_index if batch_index.ndim == 2 else batch_index.view(-1, 1)).to(
                     recurrent_state_all.device
@@ -769,7 +772,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 recurrent_ctx_indices = torch.arange(
                     recurrent_state_all.shape[2], dtype=torch.int64, device=recurrent_state_all.device
                 )[None, None, :]
-                recurrent_state = CtxGatherFuncCB.apply(
+                recurrent_state = select_interface(CtxGatherFuncCB.apply, torch.ops.qefficient.ctx_gather_cb)(
                     recurrent_state_all, recurrent_batch_index, recurrent_ctx_indices, recurrent_state_all.shape[2]
                 )
             else:
@@ -789,7 +792,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_position_ids = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-                cache_params.conv_states[self.layer_idx] = CtxScatterFuncCB3D.apply(
+                cache_params.conv_states[self.layer_idx] = select_interface(
+                    CtxScatterFuncCB3D.apply, torch.ops.qefficient.ctx_scatter_cb_3d
+                )(
                     conv_state_all, conv_batch_index, conv_position_ids, new_conv_state
                 )
             else:
@@ -851,7 +856,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 recurrent_position_ids = torch.arange(
                     recurrent_state_all.shape[2], dtype=torch.int64, device=recurrent_state_all.device
                 )[None, :].expand(recurrent_batch_index.shape[0], -1)
-                cache_params.recurrent_states[self.layer_idx] = CtxScatterFuncCB.apply(
+                cache_params.recurrent_states[self.layer_idx] = select_interface(
+                    CtxScatterFuncCB.apply, torch.ops.qefficient.ctx_scatter_cb
+                )(
                     recurrent_state_all,
                     recurrent_batch_index,
                     recurrent_position_ids,
@@ -2001,7 +2008,7 @@ def _build_matched_idx_from_cumsum(T2Ei: torch.Tensor) -> torch.Tensor:
     # Once the compiler fix for ConstantOfShape(INT32_MAX) is available, this
     # can be switched back to ``torch.full_like(token_idx, int32_max)``.
     matched_idx = int32_max_scalar.expand_as(token_idx)
-    matched_idx = CtxScatterFunc3DInt.apply(
+    matched_idx = select_interface(CtxScatterFunc3DInt.apply, torch.ops.qefficient.ctx_scatter_3d_int)(
         matched_idx.unsqueeze(-1),
         scatter_pos,
         token_idx.unsqueeze(-1),
@@ -2047,23 +2054,29 @@ def _cumsum_scatter_gather_update_expert_blocked(
         packed_stop = packed_start + packed_chunk_size
         chunk_matched_idx = matched_idx[:, packed_start:packed_stop]
 
-        x_chunk = CtxGatherFunc3DGeneralized.apply(x_expanded, chunk_matched_idx)
+        ctx_gather_3d_gen_interface = select_interface(
+            CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized
+        )
+        ctx_scatter_3d_gen_interface = select_interface(
+            CtxScatterFunc3DGeneralized.apply, torch.ops.qefficient.ctx_scatter_3d_generalized
+        )
+        x_chunk = ctx_gather_3d_gen_interface(x_expanded, chunk_matched_idx)
 
         gate_prime = x_chunk @ W_g
         up_prime = x_chunk @ W_u
         down_chunk = (up_prime * act_fn(gate_prime)) @ W_d
 
-        rw_chunk = CtxGatherFunc3DGeneralized.apply(rw_expanded, chunk_matched_idx)
+        rw_chunk = ctx_gather_3d_gen_interface(rw_expanded, chunk_matched_idx)
         down_chunk = down_chunk * rw_chunk
 
-        expert_out_chunk = CtxGatherFunc3DGeneralized.apply(experts_out, chunk_matched_idx)
+        expert_out_chunk = ctx_gather_3d_gen_interface(experts_out, chunk_matched_idx)
         updated_chunk = expert_out_chunk + down_chunk
 
         chunk_valid_rows = torch.clamp(valid_rows - packed_start, min=0, max=packed_chunk_size)
         updated_chunk = torch.where(
             (row_range < chunk_valid_rows).unsqueeze(-1), updated_chunk, torch.zeros_like(updated_chunk)
         )
-        experts_out = CtxScatterFunc3DGeneralized.apply(experts_out, chunk_matched_idx, updated_chunk)
+        experts_out = ctx_scatter_3d_gen_interface(experts_out, chunk_matched_idx, updated_chunk)
 
     return experts_out
 

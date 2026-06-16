@@ -29,7 +29,6 @@ from QEfficient.utils.logging_utils import logger
 from QEfficient.utils.torch_patches import (
     apply_torch_patches,
     temporarily_disable_nested_compile_regions,
-    temporarily_enable_nested_compile_regions,
     undo_torch_patches,
 )
 
@@ -169,14 +168,20 @@ def export_wrapper(func):
 
         export_context = nullcontext()
         subfunction_setup_done = False
-        decoder_layer_classes = get_decoder_layer_classes_for_export(self.model)
+        # dynamo=True + subfunctions=True: @nested_compile_region is already a static
+        # decorator on every modeling class's forward — no runtime wrapping needed.
+        # dynamo=False + subfunctions=False: result would be unused.
+        # All other combinations still need the class set.
+        decoder_layer_classes = (
+            None
+            if (use_onnx_subfunctions and use_dynamo)
+            else get_decoder_layer_classes_for_export(self.model)
+        )
         try:
             # 1. Setup the requested export mode
             if use_onnx_subfunctions:
-                args, kwargs = _setup_onnx_subfunctions(self, args, kwargs)
+                args, kwargs = _setup_onnx_subfunctions(self, args, kwargs, decoder_layer_classes)
                 subfunction_setup_done = True
-                if use_dynamo and decoder_layer_classes:
-                    export_context = temporarily_enable_nested_compile_regions(self.model, decoder_layer_classes)
             elif use_dynamo:
                 export_context = temporarily_disable_nested_compile_regions(self.model, decoder_layer_classes)
 
@@ -208,14 +213,7 @@ def export_wrapper(func):
                     with dynamo_patch:
                         onnx_path = func(self, *args, **kwargs)
             except Exception as export_exc:
-                if use_onnx_subfunctions and use_dynamo and decoder_layer_classes:
-                    raise RuntimeError(
-                        "Export failed with use_dynamo=True and use_onnx_subfunctions=True while nested compile "
-                        f"regions were enabled for repeated-subgraph extraction ({type(export_exc).__name__}: "
-                        f"{export_exc}). Retry export with use_onnx_subfunctions=False for this model/runtime."
-                    ) from export_exc
-                else:
-                    raise
+                raise
 
             # 5. Save export metadata
             _save_export_metadata(export_dir, filtered_hash_params)
@@ -304,7 +302,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     return export_hash, filtered_hash_params
 
 
-def _setup_onnx_subfunctions(qeff_model, args, kwargs):
+def _setup_onnx_subfunctions(qeff_model, args, kwargs, decoder_layer_classes=None):
     """
     Setup ONNX subfunction export environment.
 
@@ -353,20 +351,17 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs):
     if use_dynamo:
         qeff_model._onnx_transforms.append(PreserveNestedCacheRetainedStateTransform)
         qeff_model._onnx_transforms.append(RenameRepeatedSubgraphTransform)
+        # No decoder_layer_classes call here — disentangled from dynamo path.
+        # RenameRepeatedSubgraphTransform discovers classnames internally via pytorch_model.
     else:
         qeff_model._onnx_transforms.append(RenameFunctionOutputsTransform)
         qeff_model._onnx_transforms.append(CustomOpTransform)
 
     # TODO: Handle this in the modelling class QEFFTransformersBase, remove from here.
-    decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)
-    if decoder_layer_classes:
-        if use_dynamo:
-            target_classnames = sorted(cls.__name__ for cls in decoder_layer_classes)
-            qeff_model._subfunction_target_classnames = target_classnames
-            onnx_transform_kwargs = dict(kwargs.get("onnx_transform_kwargs") or {})
-            onnx_transform_kwargs["target_classnames"] = target_classnames
-            kwargs["onnx_transform_kwargs"] = onnx_transform_kwargs
-        else:
+    if not use_dynamo:
+        if decoder_layer_classes is None:
+            decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)
+        if decoder_layer_classes:
             kwargs["export_modules_as_functions"] = decoder_layer_classes
     return args, kwargs
 
@@ -399,8 +394,6 @@ def _cleanup_onnx_subfunctions(qeff_model):
         qeff_model._onnx_transforms.remove(RenameFunctionOutputsTransform)
     if CustomOpTransform in qeff_model._onnx_transforms:
         qeff_model._onnx_transforms.remove(CustomOpTransform)
-    if hasattr(qeff_model, "_subfunction_target_classnames"):
-        del qeff_model._subfunction_target_classnames
     if hasattr(qeff_model, "_use_onnx_subfunctions"):
         del qeff_model._use_onnx_subfunctions
     qeff_model.hash_params.pop("use_onnx_subfunctions", None)

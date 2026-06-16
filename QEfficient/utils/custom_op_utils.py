@@ -6,6 +6,53 @@ def select_interface(eager_impl, custom_op_impl):
     return custom_op_impl if use_custom_op else eager_impl
 
 
+@torch.library.custom_op("qefficient::ctx_scatter_3d_generalized", mutates_args=())
+def ctx_scatter_3d_generalized_op(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    """Custom 3D generalized context scatter operation (masks invalid INT32_MAX positions)"""
+    result = data.clone()
+    valid = position_ids != torch.iinfo(torch.int32).max
+    batch_idx = torch.arange(result.shape[0], device=result.device).view(-1, 1).expand_as(position_ids)
+    result[batch_idx[valid], position_ids[valid].long()] = updates[valid]
+    return result
+
+
+@ctx_scatter_3d_generalized_op.register_fake
+def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(data)
+
+
+@torch.library.custom_op("qefficient::ctx_scatter_3d_int", mutates_args=())
+def ctx_scatter_3d_int_op(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    """Custom 3D INT32 context scatter operation"""
+    result = data.clone()
+    valid = position_ids != torch.iinfo(torch.int32).max
+    batch_idx = torch.arange(result.shape[0], device=result.device).view(-1, 1).expand_as(position_ids)
+    result[batch_idx[valid], position_ids[valid].long()] = updates[valid]
+    return result
+
+
+@ctx_scatter_3d_int_op.register_fake
+def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(data)
+
+
+@torch.library.custom_op("qefficient::ctx_gather_3d_generalized", mutates_args=())
+def ctx_gather_3d_generalized_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    """Custom 3D generalized context gather operation (tolerates INT32_MAX indices)"""
+    batch_indices = torch.arange(data.shape[0], device=data.device).view(-1, 1)
+    ctx_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+    return data[batch_indices, ctx_indices]
+
+
+@ctx_gather_3d_generalized_op.register_fake
+def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    batch_size = data.shape[0]
+    seq_len = ctx_indices.shape[1]
+    feature_shape = data.shape[2:]
+    out_shape = (batch_size, seq_len, *feature_shape)
+    return torch.empty(out_shape, dtype=data.dtype, device=data.device)
+
+
 @torch.library.custom_op("qefficient::rms_norm", mutates_args=())
 def rms_norm_op(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
     """Custom RMS Norm operation for QEfficient"""

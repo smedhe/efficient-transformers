@@ -31,7 +31,21 @@ from QEfficient.base.onnx_transforms import (
 from QEfficient.base.pytorch_transforms import PytorchTransform
 from QEfficient.blocking.blocking_configurator import build_transformer_blocking_config_for_transform
 from QEfficient.compile.qnn_compiler import compile as qnn_compile
-from QEfficient.customop.ctx_scatter_gather import CtxGather, CtxScatter
+from QEfficient.customop.ctx_scatter_gather import (
+    CtxGather,
+    CtxGather3D,
+    CtxGatherBlockedKV,
+    CtxScatter,
+    CtxScatter3D,
+    CtxScatter3DInt,
+)
+from QEfficient.customop.ctx_scatter_gather_cb import (
+    CtxGatherBlockedKVCB,
+    CtxGatherCB,
+    CtxGatherCB3D,
+    CtxScatterCB,
+    CtxScatterCB3D,
+)
 from QEfficient.customop.rms_norm import CustomRMSNorm
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.pytorch_transforms import (
@@ -432,8 +446,21 @@ class QEFFBaseModel(ABC):
                 export_kwargs["custom_translation_table"] = {
                     **(export_kwargs.pop("custom_translation_table", None) or {}),
                     torch.ops.qefficient.rms_norm.default: CustomRMSNorm,
-                    torch.ops.qefficient.ctx_gather.default: CtxGather,
+                    # Non-CB scatter/gather
                     torch.ops.qefficient.ctx_scatter.default: CtxScatter,
+                    torch.ops.qefficient.ctx_scatter_3d.default: CtxScatter3D,
+                    torch.ops.qefficient.ctx_scatter_3d_generalized.default: CtxScatter3D,
+                    torch.ops.qefficient.ctx_scatter_3d_int.default: CtxScatter3DInt,
+                    torch.ops.qefficient.ctx_gather.default: CtxGather,
+                    torch.ops.qefficient.ctx_gather_3d.default: CtxGather3D,
+                    torch.ops.qefficient.ctx_gather_3d_generalized.default: CtxGather3D,
+                    torch.ops.qefficient.ctx_gather_blocked_kv.default: CtxGatherBlockedKV,
+                    # CB scatter/gather
+                    torch.ops.qefficient.ctx_scatter_cb.default: CtxScatterCB,
+                    torch.ops.qefficient.ctx_scatter_cb_3d.default: CtxScatterCB3D,
+                    torch.ops.qefficient.ctx_gather_cb.default: CtxGatherCB,
+                    torch.ops.qefficient.ctx_gather_cb_3d.default: CtxGatherCB3D,
+                    torch.ops.qefficient.ctx_gather_blocked_kv_cb.default: CtxGatherBlockedKVCB,
                 }
 
                 prev_invoke_fallback = os.environ.get("TORCH_INVOKE_ALLOW_CREATE_FALLBACK")
@@ -483,6 +510,7 @@ class QEFFBaseModel(ABC):
                 "onnx_base_dir": str(export_dir) if needs_external_tensor_data else None,
                 "model_name": self.model_name,
                 "dynamic_axes": dynamic_axes,
+                "pytorch_model": self.model,
             }
             if onnx_transform_kwargs is not None:
                 transform_kwargs.update(onnx_transform_kwargs)

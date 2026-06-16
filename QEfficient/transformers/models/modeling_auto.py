@@ -405,7 +405,7 @@ class QEFFAutoModel(QEFFTransformersBase):
             dynamic_shapes[input_name] = input_dynamic_shapes
         return dynamic_shapes
 
-    def export(self, export_dir: Optional[str] = None, use_dynamo: Optional[bool] = False, **kwargs) -> str:
+    def export(self, export_dir: Optional[str] = None, **kwargs) -> str:
         """
         Export the model to ONNX format using ``torch.onnx.export``.
 
@@ -417,6 +417,8 @@ class QEFFAutoModel(QEFFTransformersBase):
         export_dir : str, optional
             Directory path where the exported ONNX graph will be saved. If not provided,
             the default export directory is used.
+        use_dynamo: bool, optional
+            whether to enable dynamo during export. Defaults to False
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
 
@@ -425,6 +427,7 @@ class QEFFAutoModel(QEFFTransformersBase):
         str
             Path to the generated ONNX graph file.
         """
+        use_dynamo = kwargs.pop("use_dynamo", False)
         bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
 
@@ -993,7 +996,6 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
         dynamic_shapes,
         export_dir=None,
         offload_pt_weights=True,
-        use_dynamo: Optional[bool] = False,
         **kwargs,
     ):
         """
@@ -1011,6 +1013,8 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
             Directory path where the exported ONNX graph will be saved. Default is None.
         offload_pt_weights : bool, optional
             If True, PyTorch weights will be offloaded after export. Default is True.
+        use_dynamo: bool, optional
+            whether to enable dynamo during export. Defaults to False
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
 
@@ -1019,6 +1023,7 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
         str
             Path to the generated ONNX graph file for the vision encoder.
         """
+        use_dynamo = kwargs.pop("use_dynamo", False)
         use_onnx_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
         return self._export(
             inputs,
@@ -1166,7 +1171,6 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         prefill_seq_len: Optional[int] = None,
         prefill_only: bool = False,
         enable_chunking: bool = False,
-        use_dynamo: bool = False,
         **kwargs,
     ):
         """
@@ -1186,16 +1190,17 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
             Directory path where the exported ONNX graph will be saved. Default is None.
         offload_pt_weights : bool, optional
             If True, PyTorch weights will be offloaded after export. Default is True.
-        use_onnx_subfunctions: bool, optional
-            whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
         use_dynamo: bool, optional
             whether to enable dynamo during export. Defaults to False
+        use_onnx_subfunctions: bool, optional
+            whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
 
         Returns
         -------
         str
             Path to the generated ONNX graph file for the language decoder.
         """
+        use_dynamo = kwargs.pop("use_dynamo", False)
         use_onnx_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
 
         if prefill_only:
@@ -1410,8 +1415,6 @@ class _QEffAutoModelForImageTextToTextDualQPC:
     def export(
         self,
         export_dir: Optional[str] = None,
-        use_onnx_subfunctions: bool = False,
-        use_dynamo: bool = False,
         skip_vision: Optional[bool] = False,
         skip_lang: Optional[bool] = False,
         prefill_seq_len: Optional[int] = None,
@@ -1429,6 +1432,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         ----------
         export_dir : str, optional
             Directory path where the exported ONNX graphs will be saved. Default is None.
+        use_dynamo: bool, optional
+            whether to enable dynamo during export. Defaults to False
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
         **kwargs :
@@ -1439,6 +1444,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         List[str]
             A list containing the paths to the generated ONNX graph files for both components.
         """
+        use_dynamo = kwargs.pop("use_dynamo", False)
+        use_onnx_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
         dummy_inputs_kwargs = {}
         if prefill_seq_len is not None:
             dummy_inputs_kwargs["prefill_seq_len"] = int(prefill_seq_len)
@@ -2350,11 +2357,9 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
     def export(
         self,
         export_dir: Optional[str] = None,
-        use_onnx_subfunctions: bool = False,
         prefill_seq_len: Optional[int] = None,
         prefill_only: bool = False,
         enable_chunking: bool = False,
-        use_dynamo: bool = False,
         **kwargs,
     ) -> str:
         """
@@ -2364,6 +2369,10 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         ----------
         export_dir : str, optional
             Directory path where the exported ONNX graph will be saved. Default is None.
+        use_dynamo: bool, optional
+            whether to enable dynamo during export. Defaults to False
+        use_onnx_subfunctions: bool, optional
+            whether to enable ONNX subfunctions during export. Defaults to False
         **kwargs :
             Additional keyword arguments.
 
@@ -2372,6 +2381,8 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         str
             Path to the generated ONNX graph file.
         """
+        use_dynamo = kwargs.pop("use_dynamo", False)
+        use_onnx_subfunctions = kwargs.pop("use_onnx_subfunctions", False)
         if prefill_only:
             assert prefill_seq_len > 1
             if not enable_chunking and self.continuous_batching:
@@ -3449,7 +3460,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         prefill_seq_len: Optional[int] = None,
         num_cores: int = constants.DEFAULT_AIC_NUM_CORES,
         moe_prefill_packed_chunk_size: int = constants.MOE_PREFILL_PACKED_CHUNK_SIZE,
-        use_dynamo: bool = False,
         **kwargs,
     ) -> str:
         """
@@ -3464,15 +3474,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         export_dir : str, optional
             Directory path where the exported ONNX graph will be saved.
             If not provided, the default export directory is used.
+        use_dynamo: bool, optional
+            whether to enable dynamo during export. Defaults to False
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
-        use_dynamo: bool, optional
-            whether to enable dynamo during export.
         Returns
         -------
         str
             Path to the generated ONNX graph file.
         """
+        use_dynamo = kwargs.pop("use_dynamo", False)
         if kwargs.pop("decode_only", False):
             raise NotImplementedError(
                 "decode_only=True is not supported by QEFFAutoModelForCausalLM.export(). "
