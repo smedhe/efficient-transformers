@@ -882,6 +882,53 @@ class QEffWhisperForConditionalGeneration(WhisperForConditionalGeneration):
 
         return dynamic_axes
 
+    def get_onnx_dynamic_shapes(self):
+        """
+        Derive torch.export dynamic_shapes from get_onnx_dynamic_axes() for use with the
+        dynamo ONNX exporter (use_dynamo=True).
+
+        Key differences from the legacy dynamic_axes dict:
+        - String dimension names are replaced with torch.export.Dim objects carrying
+          concrete min/max bounds so the symbolic tracer can reason about tensor sizes.
+        - Dimensions sharing the same name (e.g. "batch_size" across multiple inputs)
+          reuse the *same* Dim object, which tells dynamo they must be equal at runtime.
+        - decoder_ctx_len and encoder_ctx_len are kept as *separate* Dim objects because
+          they are structurally independent: the encoder KV is frozen at encoder_seq_len
+          (max_source_positions) while the decoder KV grows token-by-token up to ctx_len.
+        - past_key_values for the encoder (cross-attention) are fixed at
+          max_source_positions; for the decoder (self-attention) they grow up to the
+          compilation ctx_len. Both are represented in the returned dict as a nested
+          list-of-tuples mirroring the forward() signature.
+        """
+        from torch.export import Dim
+
+        num_layers = self.config.num_hidden_layers
+        max_decoder_ctx = getattr(self.config, "max_target_positions", 448)
+        max_encoder_ctx = getattr(self.config, "max_source_positions", 1500)
+        max_feature_len = max_encoder_ctx * 2  # mel feature frames are 2x encoder positions
+
+        batch_size = Dim("batch_size", min=1, max=64)
+        seq_len = Dim("seq_len", min=1, max=max_decoder_ctx)
+        feature_len = Dim("feature_len", min=1, max=max_feature_len)
+        decoder_ctx_len = Dim("decoder_ctx_len", min=1, max=max_decoder_ctx)
+        encoder_ctx_len = Dim("encoder_ctx_len", min=1, max=max_encoder_ctx)
+
+        dynamic_shapes = {
+            "input_features": {0: batch_size, 2: feature_len},
+            "input_ids":      {0: batch_size, 1: seq_len},
+            "position_ids":   {0: batch_size, 1: seq_len},
+            "past_key_values": [
+                (
+                    {0: batch_size, 2: decoder_ctx_len},  # past_key_self.i
+                    {0: batch_size, 2: decoder_ctx_len},  # past_value_self.i
+                    {0: batch_size, 2: encoder_ctx_len},  # past_key_cross.i
+                    {0: batch_size, 2: encoder_ctx_len},  # past_value_cross.i
+                )
+                for _ in range(num_layers)
+            ],
+        }
+        return dynamic_shapes
+
     def get_output_names(
         self,
     ):

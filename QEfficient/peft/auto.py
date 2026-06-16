@@ -310,6 +310,7 @@ class QEffAutoPeftModelForCausalLM(QEFFBaseModel):
         mxfp6_matmul: bool = False,
         mxint8_kv_cache: bool = False,
         use_onnx_subfunctions: bool = False,
+        use_dynamo: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -328,6 +329,8 @@ class QEffAutoPeftModelForCausalLM(QEFFBaseModel):
             num_cores (int, optional): Number of cores to use for compilation. Default is 16.
             mxfp6_matmul (bool, optional): Use MXFP6 compression for weights. Default is False.
             mxint8_kv_cache (bool, optional): Use MXINT8 compression for KV cache. Default is False.
+            use_onnx_subfunctions (bool, optional): Enable ONNX subfunctions during export/compile. Default is False.
+            use_dynamo (bool, optional): Use the dynamo-based ONNX exporter. Default is False.
             **compiler_options: Additional compiler options for QAIC.
 
                 **For QAIC Compiler:** Extra arguments for qaic-compile can be passed. Some common options include:
@@ -377,6 +380,7 @@ class QEffAutoPeftModelForCausalLM(QEFFBaseModel):
             aic_num_cores=num_cores,
             mxint8_kv_cache=mxint8_kv_cache,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            use_dynamo=use_dynamo,
             **compiler_options,
         )
 

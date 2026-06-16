@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 
 import math
-from typing import Callable, List, Optional, Tuple, Type, Union
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -902,6 +902,102 @@ class QEffMolmoModel(nn.Module):
         else:
             dynamic_axes = {**vision_dynamic_axes, **lang_dynamic_axes}
         return dynamic_axes
+
+    def get_onnx_dynamic_shapes(
+        self,
+        comp_ctx_lengths: Optional[List[int]] = None,
+        kv_offload: bool = False,
+        continuous_batching: bool = False,
+    ):
+        from torch.export import Dim
+
+        num_layers = self.model.config.n_layers
+        dim_registry: Dict[str, Dim] = {}
+
+        def get_dim(dim_name: str) -> Dim:
+            if dim_name in dim_registry:
+                return dim_registry[dim_name]
+            if dim_name == "batch_size":
+                d = Dim(dim_name, min=1, max=1024)
+            elif dim_name == "full_batch_size":
+                d = Dim(dim_name, min=1, max=2048)
+            elif dim_name == "num_images":
+                d = Dim(dim_name, min=1, max=8)
+            elif dim_name == "img_tile":
+                d = Dim(dim_name, min=1, max=256)
+            elif dim_name == "img_size":
+                d = Dim(dim_name, min=1, max=448)
+            elif dim_name == "num_patch":
+                d = Dim(dim_name, min=1, max=4096)
+            elif dim_name == "valid_size":
+                d = Dim(dim_name, min=1, max=65536)
+            elif dim_name == "vision_batch_size":
+                d = Dim(dim_name, min=1, max=4096)
+            elif "seq_len" in dim_name:
+                d = Dim(dim_name, min=1, max=4096)
+            elif "ctx_len" in dim_name:
+                d = Dim(dim_name, min=1, max=4096)
+            elif "comp_ctx_lengths" in dim_name:
+                d = Dim(dim_name, min=1, max=1024)
+            else:
+                d = Dim(dim_name, min=1, max=4096)
+            dim_registry[dim_name] = d
+            return d
+
+        batch_dim = "full_batch_size" if continuous_batching else "batch_size"
+
+        vision_dynamic_shapes = {
+            "pixel_values":    {
+                0: get_dim("batch_size"),
+                1: get_dim("num_images"),
+                2: get_dim("img_tile"),
+                3: get_dim("img_size"),
+            },
+            "image_input_idx": {
+                0: get_dim("batch_size"),
+                1: get_dim("num_images"),
+                2: get_dim("num_patch"),
+            },
+            "image_masks":     {
+                0: get_dim("batch_size"),
+                1: get_dim("num_images"),
+                2: get_dim("img_tile"),
+            },
+            "valid_idx":       {
+                0: get_dim("batch_size"),
+                1: get_dim("valid_size"),
+            },
+        }
+
+        key_shape = {0: get_dim(batch_dim), 2: get_dim("ctx_len")}
+        value_shape = {0: get_dim(batch_dim), 2: get_dim("ctx_len")}
+
+        if kv_offload:
+            lang_dynamic_shapes = {
+                "input_ids":     {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "position_ids":  {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "vision_embeds": {0: get_dim("vision_batch_size"), 1: get_dim("valid_size")},
+                "past_key_values": [(key_shape, value_shape) for _ in range(num_layers)],
+            }
+            if continuous_batching:
+                lang_dynamic_shapes["batch_index"] = {0: get_dim("batch_size")}
+            if comp_ctx_lengths is not None:
+                lang_dynamic_shapes["comp_ctx_lengths"] = {0: get_dim("comp_ctx_lengths")}
+            return {"vision": vision_dynamic_shapes, "lang": lang_dynamic_shapes}
+        else:
+            lang_dynamic_shapes = {
+                "input_ids":    {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+            }
+            if continuous_batching:
+                lang_dynamic_shapes["batch_index"] = {0: get_dim("batch_size")}
+            if comp_ctx_lengths is not None:
+                lang_dynamic_shapes["comp_ctx_lengths"] = {0: get_dim("comp_ctx_lengths")}
+            return {
+                **vision_dynamic_shapes,
+                **lang_dynamic_shapes,
+                "past_key_values": [(key_shape, value_shape) for _ in range(num_layers)],
+            }
 
     def get_output_names(self, kv_offload: bool = False):
         vision_output_names = ["vision_embeds"]

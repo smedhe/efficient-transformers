@@ -358,7 +358,7 @@ from QEfficient.transformers.models.gemma3.modeling_gemma3 import (
     QEffGemma3ForCausalLMModel,
     QEffGemma3ForConditionalGeneration,
     QEffGemma3TextModel,
-    QEffSiglipEncoderLayer,
+    # QEffSiglipEncoderLayer,
 )
 from QEfficient.transformers.models.gemma4.modeling_gemma4 import (
     QEffGemma4CustomRMSNormAIC,
@@ -933,7 +933,7 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlock,
         Qwen3VLVisionBlock: QEffQwen3VLVisionBlock,
         Qwen3VLMoeVisionBlock: QEffQwen3VLMoeVisionBlock,
-        SiglipEncoderLayer: QEffSiglipEncoderLayer,
+        # SiglipEncoderLayer: QEffSiglipEncoderLayer,
         WhisperEncoderLayer: QEffWhisperEncoderLayerRegion,
     }
 

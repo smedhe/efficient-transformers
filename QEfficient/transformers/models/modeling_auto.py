@@ -945,12 +945,26 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
 
         output_names = ["logits"]
 
+        use_dynamo = kwargs.get("use_dynamo", False)
+        dynamic_shapes = None
+        if use_dynamo:
+            from torch.export import Dim
+            max_seq_len = getattr(self.model.config, "max_position_embeddings", 512)
+            batch_size = Dim("batch_size", min=1, max=64)
+            seq_len_dim = Dim("seq_len", min=1, max=max_seq_len)
+            dynamic_shapes = {
+                "input_ids":      {0: batch_size, 1: seq_len_dim},
+                "attention_mask": {0: batch_size, 1: seq_len_dim},
+            }
+
         return self._export(
             example_inputs,
             output_names,
             dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             export_dir=export_dir,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+            use_dynamo=use_dynamo,
         )
 
     def compile(
@@ -964,6 +978,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
         num_cores: int = 16,
         mxfp6_matmul: bool = False,
         use_onnx_subfunctions: bool = False,
+        use_dynamo: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -991,6 +1006,8 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
             Use MXFP6 compression for weights. Default is False.
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Defaults to False
+        use_dynamo: bool, optional
+            Use the dynamo-based ONNX exporter instead of the legacy TorchScript exporter. Defaults to False.
         moe_prefill_packed_chunk_size : int, optional
             Packed rows per expert-blocked MoE chunk for prefill-only chunked export. Applies only when
             ``prefill_only=True`` and ``enable_chunking=True``. Default is 256.
@@ -1024,6 +1041,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
             mdp_ts_num_devices=num_devices,
             aic_num_cores=num_cores,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            use_dynamo=use_dynamo,
             **compiler_options,
         )
 
@@ -2852,6 +2870,8 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
             Not supported for this model; must be None.
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
+        use_dynamo: bool, optional
+            Use the dynamo-based ONNX exporter instead of the legacy TorchScript exporter. Defaults to False.
         **compiler_options : dict
             Additional compiler options for QAIC or QNN compilers.
 
@@ -4976,12 +4996,16 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         inputs = self.model.get_dummy_inputs()
         dynamic_axes = self.model.get_onnx_dynamic_axes()
         output_names = self.model.get_output_names()
+        use_dynamo = kwargs.get("use_dynamo", False)
+        dynamic_shapes = self.model.get_onnx_dynamic_shapes() if use_dynamo else None
         return self._export(
             inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             export_dir=export_dir,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+            use_dynamo=use_dynamo,
         )
 
     def compile(
@@ -5001,6 +5025,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         mxint8_kv_cache: bool = False,
         num_speculative_tokens: Optional[int] = None,
         use_onnx_subfunctions: bool = False,
+        use_dynamo: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -5044,6 +5069,8 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
             Not yet supported for this model.
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
+        use_dynamo: bool, optional
+            Use the dynamo-based ONNX exporter instead of the legacy TorchScript exporter. Defaults to False.
         **compiler_options : dict
             Additional compiler options for QAIC.
 
@@ -5108,6 +5135,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
             aic_num_cores=num_cores,
             custom_io=custom_io,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            use_dynamo=use_dynamo,
             **compiler_options,
         )
 
@@ -5363,12 +5391,24 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
 
         output_names = ["logits"]
 
+        use_dynamo = kwargs.get("use_dynamo", False)
+        dynamic_shapes = None
+        if use_dynamo:
+            from torch.export import Dim
+            batch_size = Dim("batch_size", min=1, max=64)
+            seq_len_dim = Dim("seq_len", min=1, max=constants.WAV2VEC2_MAX_SEQ_LEN)
+            dynamic_shapes = {
+                "input_values": {0: batch_size, 1: seq_len_dim},
+            }
+
         return self._export(
             example_inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             export_dir=export_dir,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+            use_dynamo=use_dynamo,
         )
 
     def compile(
@@ -5382,6 +5422,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
         num_cores: int = 16,  # FIXME: Make this mandatory arg
         mxfp6_matmul: bool = False,
         use_onnx_subfunctions: bool = False,
+        use_dynamo: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -5398,6 +5439,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
             :num_cores (int): Number of cores used to compile the model.
             :mxfp6_matmul (bool, optional): Whether to use ``mxfp6`` compression for weights. ``Defaults to False``.
             :use_onnx_subfunctions: bool, optional: whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
+            :use_dynamo: bool, optional: Use the dynamo-based ONNX exporter instead of the legacy TorchScript exporter. Defaults to False.
             :compiler_options (dict, optional): Additional compiler options.
 
                 For QAIC Compiler: Extra arguments for qaic-compile can be passed.
@@ -5433,6 +5475,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
             mdp_ts_num_devices=num_devices,
             aic_num_cores=num_cores,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            use_dynamo=use_dynamo,
             **compiler_options,
         )
 

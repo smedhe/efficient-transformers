@@ -7,6 +7,7 @@
 
 """PyTorch Mllama model."""
 
+import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch

@@ -5,7 +5,6 @@
 #
 # -----------------------------------------------------------------------------
 
-import copy
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
@@ -67,7 +66,6 @@ class QEffGemma3CustomRMSNormAIC(nn.Module):
             (self.weight).to(hidden_states.dtype) + 1.0,
             self.variance_epsilon if hasattr(self, "variance_epsilon") else self.eps,
         )
-        return out.to(hidden_states.dtype)
 
 
 class QEffGemma3RotaryEmbedding(nn.Module):
