@@ -1291,6 +1291,10 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         export_dir=None,
         offload_pt_weights=True,
         use_dynamo: Optional[bool] = False,
+        prefill_seq_len: Optional[int] = None,
+        prefill_only: bool = False,
+        enable_chunking: bool = False,
+        kv_cache_prefix: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -1337,6 +1341,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 offload_pt_weights=offload_pt_weights,
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
                 _layerwise_cache_probe=kwargs.get("_layerwise_cache_probe", False),
+                kv_cache_prefix=kv_cache_prefix,
             )
         else:
             return self._export(
@@ -1579,6 +1584,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 prefill_only=prefill_only,
                 enable_chunking=enable_chunking,
                 layerwise_window_size=layerwise_window_size,
+                kv_cache_prefix=kv_cache_prefix,
                 **kwargs,
             )
         dummy_inputs_kwargs = {}
@@ -1684,6 +1690,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 enable_chunking=enable_chunking,
                 prefill_seq_len=prefill_seq_len,
                 _layerwise_cache_probe=layerwise_cache_probe,
+                kv_cache_prefix=kv_cache_prefix,
             )
         return self.onnx_path
 
@@ -1952,6 +1959,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                     prefill_only=prefill_only,
                     enable_chunking=enable_chunking,
                     qaic_config=qaic_config,
+                    kv_cache_prefix=kv_cache_prefix,
                     **compiler_options,
                 )
                 self.vision_model.onnx_path = vision_wrapper.vision_model.onnx_path
@@ -1981,6 +1989,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 enable_chunking=enable_chunking,
                 qaic_config=qaic_config,
                 layerwise_window_size=layerwise_window_size,
+                kv_cache_prefix=kv_cache_prefix,
                 **compiler_options,
             )
 
@@ -3949,6 +3958,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 prefill_seq_len=prefill_seq_len,
                 num_cores=num_cores,
                 moe_prefill_packed_chunk_size=moe_prefill_packed_chunk_size,
+                kv_cache_prefix=kv_cache_prefix,
                 **kwargs,
             )
 
@@ -4221,6 +4231,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
                 offload_pt_weights=kwargs.get("offload_pt_weights", True),
                 prefill_only=prefill_only,
+                kv_cache_prefix=kv_cache_prefix,
             )
         else:
             return self._export(
@@ -4504,6 +4515,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 enable_chunking=enable_chunking,
                 moe_prefill_packed_chunk_size=moe_prefill_packed_chunk_size,
                 retain_full_kv=retain_full_kv,
+                kv_cache_prefix=kv_cache_prefix,
                 **compiler_options,
             )
         if self.model.qaic_config is not None and self.model.qaic_config.get("mla_absorption", None) is not None:
