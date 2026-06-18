@@ -336,7 +336,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     return export_hash, filtered_hash_params
 
 
-def _setup_onnx_subfunctions(qeff_model, args, kwargs):
+def _setup_onnx_subfunctions(qeff_model, args, kwargs, target_classnames=None):
     """
     Setup ONNX subfunction export environment.
 
@@ -348,8 +348,15 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs):
     - Updates export kwargs with module classes
 
     Args:
-        qeff_model: The QEff model instance
+        qeff_model: The QEff model instance.
+        args: Positional export arguments.
         kwargs: Export keyword arguments (modified in-place).
+        target_classnames: Optional sorted list of decoder layer class names
+                           for dynamo repeated-subgraph renaming.
+
+    Returns:
+        Updated args/kwargs plus cleanup state used to restore the original
+        ONNX transform list after export.
     """
     warnings.warn(
         "The subfunction feature is experimental. Please note that using compile "
@@ -381,29 +388,43 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs):
                 "Ensure `output_names` includes key/value retained states if subfunction compatibility is required."
             )
 
-    # Add subfunction-specific ONNX transforms
+    # Work on an instance-local copy and restore it in cleanup. Without this,
+    # failed or repeated subfunction exports can leak transforms into later exports.
+    original_transforms = list(qeff_model._onnx_transforms)
+    qeff_model._onnx_transforms = list(original_transforms)
+
+    # Add subfunction-specific ONNX transforms based on export path
     if use_dynamo:
-        qeff_model._onnx_transforms.append(PreserveNestedCacheRetainedStateTransform)
-        qeff_model._onnx_transforms.append(RenameRepeatedSubgraphTransform)
+        # Dynamo path: use invoke_subgraph/repeated_subgraph native transforms
+        if PreserveNestedCacheRetainedStateTransform not in qeff_model._onnx_transforms:
+            qeff_model._onnx_transforms.append(PreserveNestedCacheRetainedStateTransform)
+        if RenameRepeatedSubgraphTransform not in qeff_model._onnx_transforms:
+            qeff_model._onnx_transforms.append(RenameRepeatedSubgraphTransform)
     else:
-        qeff_model._onnx_transforms.append(RenameFunctionOutputsTransform)
-        qeff_model._onnx_transforms.append(CustomOpTransform)
+        # TorchScript path: use export-modules-as-functions transforms
+        if RenameFunctionOutputsTransform not in qeff_model._onnx_transforms:
+            qeff_model._onnx_transforms.append(RenameFunctionOutputsTransform)
+        if CustomOpTransform not in qeff_model._onnx_transforms:
+            qeff_model._onnx_transforms.append(CustomOpTransform)
 
     # TODO: Handle this in the modelling class QEFFTransformersBase, remove from here.
     decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)
     if decoder_layer_classes:
         if use_dynamo:
-            target_classnames = sorted(cls.__name__ for cls in decoder_layer_classes)
-            qeff_model._subfunction_target_classnames = target_classnames
+            # Pass target classnames to RenameRepeatedSubgraphTransform via onnx_transform_kwargs
+            resolved_classnames = target_classnames or sorted(cls.__name__ for cls in decoder_layer_classes)
+            qeff_model._subfunction_target_classnames = resolved_classnames
             onnx_transform_kwargs = dict(kwargs.get("onnx_transform_kwargs") or {})
-            onnx_transform_kwargs["target_classnames"] = target_classnames
+            onnx_transform_kwargs["target_classnames"] = resolved_classnames
             kwargs["onnx_transform_kwargs"] = onnx_transform_kwargs
         else:
+            # TorchScript path: pass class objects for export_modules_as_functions
             kwargs["export_modules_as_functions"] = decoder_layer_classes
-    return args, kwargs
+
+    return args, kwargs, {"onnx_transforms": original_transforms}
 
 
-def _cleanup_onnx_subfunctions(qeff_model):
+def _cleanup_onnx_subfunctions(qeff_model, state=None):
     """
     Cleanup ONNX subfunction export environment.
 
@@ -413,7 +434,9 @@ def _cleanup_onnx_subfunctions(qeff_model):
     - Restoring original ONNX transforms list
 
     Args:
-        qeff_model: The QEff model instance
+        qeff_model: The QEff model instance.
+        state: Cleanup state dict returned by _setup_onnx_subfunctions,
+               containing the original ONNX transforms list to restore.
 
     Note:
         This function is called in a finally block to ensure cleanup
@@ -423,14 +446,11 @@ def _cleanup_onnx_subfunctions(qeff_model):
     # Undo torch patches
     undo_torch_patches()
     InvalidIndexProvider.SUBFUNC_ENABLED = False
-    if PreserveNestedCacheRetainedStateTransform in qeff_model._onnx_transforms:
-        qeff_model._onnx_transforms.remove(PreserveNestedCacheRetainedStateTransform)
-    if RenameRepeatedSubgraphTransform in qeff_model._onnx_transforms:
-        qeff_model._onnx_transforms.remove(RenameRepeatedSubgraphTransform)
-    if RenameFunctionOutputsTransform in qeff_model._onnx_transforms:
-        qeff_model._onnx_transforms.remove(RenameFunctionOutputsTransform)
-    if CustomOpTransform in qeff_model._onnx_transforms:
-        qeff_model._onnx_transforms.remove(CustomOpTransform)
+    # Restore the original transforms list from before setup — covers both
+    # dynamo and TorchScript subfunction paths cleanly.
+    if state is not None and "onnx_transforms" in state:
+        qeff_model._onnx_transforms = state["onnx_transforms"]
+    # Clean up dynamo-specific classname tracking if present
     if hasattr(qeff_model, "_subfunction_target_classnames"):
         del qeff_model._subfunction_target_classnames
     if hasattr(qeff_model, "_use_onnx_subfunctions"):

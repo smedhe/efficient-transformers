@@ -11,6 +11,10 @@ Patches kept here:
   - TorchScript ONNX exporter (_setup_trace_module_map, _get_module_attributes,
     _jit_pass_onnx_track_scope_attributes): fix attribute-type mismatches in the
     legacy trace-based exporter (use_dynamo=False path).
+  - Layerwise safe export pass patches: disable expensive ONNX exporter passes
+    for layerwise prefill export (TorchScript path).
+  - temporarily_enable_nested_compile_regions / temporarily_disable_nested_compile_regions:
+    context managers for dynamo export path subgraph boundary management.
 
 Patches removed (upstreamed to PyTorch):
   - FunctionalTensorMode.__torch_dispatch__ tracker-entry KeyError
@@ -30,7 +34,7 @@ import torch.onnx.utils as onnx_utils
 from torch import _C
 from torch.onnx._internal.torchscript_exporter import utils as ts_utils
 
-# Store original references before patching
+
 _original_setup_trace_module_map = onnx_utils._setup_trace_module_map
 _original_get_module_attributes = getattr(onnx_utils, "_get_module_attributes", None)
 _original_track_scope_attrs = getattr(_C, "_jit_pass_onnx_track_scope_attributes", None)
@@ -39,6 +43,46 @@ _original_ts_get_module_attributes = getattr(ts_utils, "_get_module_attributes",
 
 _PATCHES_ACTIVE = False
 _MISSING_INSTANCE_ATTR = object()
+
+_safe_export_patch_depth = 0
+_safe_export_original_passes = {}
+_SAFE_EXPORT_REQUIRED_PASSES = {
+    "_jit_pass_dce",
+    "_jit_pass_dce_allow_deleting_nodes_with_side_effects",
+}
+
+
+def _noop(*args, **kwargs):
+    return None
+
+
+def _return_false(*args, **kwargs):
+    return False
+
+
+def _return_graph(graph, *args, **kwargs):
+    return graph
+
+
+def _return_params(_graph, params_dict, *args, **kwargs):
+    return params_dict
+
+
+_SAFE_EXPORT_PASS_REPLACEMENTS = {
+    "_jit_pass_constant_propagation": _noop,
+    "_jit_pass_dce": _noop,
+    "_jit_pass_cse": _return_false,
+    "_jit_pass_canonicalize_graph_fuser_ops": _noop,
+    "_jit_pass_peephole": _noop,
+    "_jit_pass_fuse_addmm": _noop,
+    "_jit_pass_onnx_eval_peephole": _return_params,
+    "_jit_pass_onnx_constant_fold": _return_params,
+    "_jit_pass_dce_allow_deleting_nodes_with_side_effects": _noop,
+    "_jit_pass_canonicalize": _return_graph,
+    "_jit_pass_onnx_graph_shape_type_inference": _noop,
+    "_jit_pass_onnx_deduplicate_initializers": _return_params,
+}
+
 
 
 def _setup_trace_module_map_patched(
@@ -115,6 +159,8 @@ def _get_module_attributes(module):
 
     import torch.nn
 
+    # added _is_safe_value guard to prevent IValue-incompatible
+    # types from being passed into the ONNX scope-attribute tracker.
     def _is_safe_value(value):
         if isinstance(value, (int, float, bool, str, torch.Tensor)) or value is None:
             return True
@@ -130,6 +176,7 @@ def _get_module_attributes(module):
     for k in annotations:
         try:
             value = getattr(module, k)
+            # Only include IValue-compatible attribute types
             if _is_safe_value(value):
                 attrs[k] = value
         except AttributeError:
@@ -151,18 +198,82 @@ def _track_scope_attributes_patched(graph, attrs):
     return _original_track_scope_attrs(graph, safe_attrs)
 
 
+
+def _layerwise_safe_export_passes_enabled():
+    try:
+        from QEfficient.base.modeling_qeff import QEFFBaseModel
+    except Exception:
+        return False
+    return bool(getattr(QEFFBaseModel, "_layerwise_active", False))
+
+
+def _enable_safe_export_pass_patches(keep_passes=None):
+    global _safe_export_patch_depth
+
+    keep_passes = _SAFE_EXPORT_REQUIRED_PASSES | set(keep_passes or ())
+    if _safe_export_patch_depth == 0:
+        _safe_export_original_passes.clear()
+        for name, replacement in _SAFE_EXPORT_PASS_REPLACEMENTS.items():
+            if name in keep_passes:
+                continue
+            if hasattr(_C, name):
+                _safe_export_original_passes[name] = getattr(_C, name)
+                setattr(_C, name, replacement)
+    _safe_export_patch_depth += 1
+
+
+def _disable_safe_export_pass_patches():
+    global _safe_export_patch_depth
+
+    if _safe_export_patch_depth == 0:
+        return
+
+    _safe_export_patch_depth -= 1
+    if _safe_export_patch_depth == 0:
+        for name, original in _safe_export_original_passes.items():
+            setattr(_C, name, original)
+        _safe_export_original_passes.clear()
+
+
+@contextmanager
+def layerwise_safe_onnx_export_patches(enabled: bool = True, keep_passes=None):
+    """Temporarily disable expensive ONNX exporter passes for layerwise prefill.
+
+    This is a no-op unless the caller explicitly enables it and the process is
+    inside the layerwise export context. Regular/non-layerwise export therefore
+    keeps the original PyTorch ONNX exporter behavior. DCE stays enabled by
+    default because some exported graphs need it to remove aten/prim nodes before
+    PyTorch serializes ONNX. ``keep_passes`` can retain additional passes.
+    """
+    if not enabled or not _layerwise_safe_export_passes_enabled():
+        yield
+        return
+
+    _enable_safe_export_pass_patches(keep_passes=keep_passes)
+    try:
+        yield
+    finally:
+        _disable_safe_export_pass_patches()
+
+
+
 def apply_torch_patches():
     """Apply monkey patches for ONNX export (TorchScript path)."""
     global _PATCHES_ACTIVE
     if _PATCHES_ACTIVE:
         return
 
+    # Patch onnx_utils (used by both TorchScript and as fallback)
     onnx_utils._setup_trace_module_map = _setup_trace_module_map_patched
     if hasattr(onnx_utils, "_get_module_attributes"):
         onnx_utils._get_module_attributes = _get_module_attributes
+
+    # Patch ts_utils (TorchScript-specific exporter utilities)
     ts_utils._setup_trace_module_map = _setup_trace_module_map_patched
     if hasattr(ts_utils, "_get_module_attributes"):
         ts_utils._get_module_attributes = _get_module_attributes
+
+    # Patch _C scope-attribute tracker to filter out IValue-incompatible types
     if _original_track_scope_attrs is not None:
         _C._jit_pass_onnx_track_scope_attributes = _track_scope_attributes_patched
 
@@ -178,13 +289,16 @@ def undo_torch_patches():
     onnx_utils._setup_trace_module_map = _original_setup_trace_module_map
     if _original_get_module_attributes:
         onnx_utils._get_module_attributes = _original_get_module_attributes
+
     ts_utils._setup_trace_module_map = _original_ts_setup_trace_module_map
     if _original_ts_get_module_attributes:
         ts_utils._get_module_attributes = _original_ts_get_module_attributes
+
     if _original_track_scope_attrs is not None:
         _C._jit_pass_onnx_track_scope_attributes = _original_track_scope_attrs
 
     _PATCHES_ACTIVE = False
+
 
 
 @contextmanager
@@ -207,6 +321,7 @@ def temporarily_enable_nested_compile_regions(model, target_classes=None):
                 continue
 
             wrapped_forward = getattr(bound_forward, "__func__", bound_forward)
+            # Skip if already wrapped by nested_compile_region
             if getattr(wrapped_forward, "__qualname__", "") == "mark_compile_region.<locals>.wrap.<locals>.inner":
                 continue
 
@@ -228,7 +343,11 @@ def temporarily_enable_nested_compile_regions(model, target_classes=None):
 def temporarily_disable_nested_compile_regions(model, target_classes=None):
     """
     Replace nested_compile_region-wrapped ``forward`` methods with their original
-    underlying functions for the duration of plain dynamo export.
+    underlying functions for the duration of plain dynamo export (Path 3).
+
+    Used when use_dynamo=True and use_onnx_subfunctions=False so that
+    @nested_compile_region boundaries statically present on decoder layer
+    forward() methods do not create unwanted subgraph splits during tracing.
     """
 
     target_classes = tuple(target_classes) if target_classes else None
@@ -244,9 +363,11 @@ def temporarily_disable_nested_compile_regions(model, target_classes=None):
                 continue
 
             wrapped_forward = getattr(bound_forward, "__func__", bound_forward)
+            # Only unwrap methods that are actually nested_compile_region-wrapped
             if getattr(wrapped_forward, "__qualname__", "") != "mark_compile_region.<locals>.wrap.<locals>.inner":
                 continue
 
+            # Extract the original forward from the closure
             closure = getattr(wrapped_forward, "__closure__", None) or ()
             original_forward = next(
                 (cell.cell_contents for cell in closure if inspect.isfunction(cell.cell_contents)),
