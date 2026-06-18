@@ -173,7 +173,6 @@ def eager_attention_forward_blocked_kv(
     past_seen_tokens = cache_kwargs.get("past_seen_tokens")
     position_ids = cache_kwargs.get("position_ids")
     block_size = -(-past_seen_tokens // num_kv_blocks)
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=query.dtype)
 
     for j in range(num_kv_blocks):
         start_index = j * block_size
@@ -193,6 +192,9 @@ def eager_attention_forward_blocked_kv(
 
         # Compute attention scores for the block
         attn_weights_block = torch.matmul(query, K_block_states.transpose(2, 3)) * scaling
+        masked_tensor = torch.full_like(
+            attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights_block.dtype
+        ).to(attn_weights_block.device)
         if attention_mask is not None:
             attn_weights_block = torch.where(causal_mask_block, masked_tensor, attn_weights_block)
 
@@ -237,10 +239,13 @@ def eager_attention_forward(
     value_states = repeat_kv(value, module.num_key_value_groups)
 
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    mask_value = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights.dtype).to(
+        attn_weights.device
+    )
+
     if attention_mask is not None:
-        attn_weights = torch.where(
-            attention_mask, torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=key_states.dtype), attn_weights
-        )
+        # Apply the attention mask
+        attn_weights = torch.where(attention_mask, mask_value, attn_weights)
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=key_states.dtype).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -290,15 +295,21 @@ def _cumsum_scatter_gather_update_expert_blocked(
         packed_stop = packed_start + packed_chunk_size
         chunk_matched_idx = matched_idx[:, packed_start:packed_stop]
 
-        x_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(x_expanded, chunk_matched_idx)
+        x_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(
+            x_expanded, chunk_matched_idx
+        )
         gate_prime = x_chunk @ W_g
         up_prime = x_chunk @ W_u
         down_chunk = (up_prime * act_fn(gate_prime)) @ W_d
 
-        rw_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(routing_weight, chunk_matched_idx)
+        rw_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(
+            routing_weight, chunk_matched_idx
+        )
         down_chunk = down_chunk * rw_chunk
 
-        expert_out_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(expert_out, chunk_matched_idx)
+        expert_out_chunk = select_interface(
+            CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized
+        )(expert_out, chunk_matched_idx)
         updated_chunk = expert_out_chunk + down_chunk
 
         chunk_valid_rows = torch.clamp(
@@ -309,7 +320,9 @@ def _cumsum_scatter_gather_update_expert_blocked(
         updated_chunk = torch.where(
             (row_range < chunk_valid_rows).unsqueeze(-1), updated_chunk, torch.zeros_like(updated_chunk)
         )
-        expert_out = select_interface(CtxScatterFunc3DGeneralized.apply, torch.ops.qefficient.ctx_scatter_3d_generalized)(expert_out, chunk_matched_idx, updated_chunk)
+        expert_out = select_interface(
+            CtxScatterFunc3DGeneralized.apply, torch.ops.qefficient.ctx_scatter_3d_generalized
+        )(expert_out, chunk_matched_idx, updated_chunk)
 
     return expert_out
 
@@ -350,7 +363,7 @@ class QEffGlm4MoeAttention(Glm4MoeAttention):
 
         if sin_cached is not None and cos_cached is not None:
             sin, cos = sin_cached, cos_cached
-            rotary_dim = int(self.rotary_emb.cos_cached.shape[-1])
+            rotary_dim = int(self.rotary_emb.cos_cached.detach().clone().shape[-1])
             query_states, key_states = qeff_apply_precomputed_rotary_pos_emb(
                 query_states, key_states, cos, sin, rotary_dim
             )
@@ -429,6 +442,7 @@ class QEffGlm4MoeAttention(Glm4MoeAttention):
 
 
 class QEffGlm4MoeDecoderLayer(Glm4MoeDecoderLayer):
+    @torch.compiler.nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,

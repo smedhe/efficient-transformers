@@ -1354,18 +1354,31 @@ class QEffQwen3VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneration)
         kv_shape = {0: get_dim(batch_dim), 2: get_dim("ctx_len")}
 
         vision_dynamic_shapes = {
-            "pixel_values":       {0: get_dim("grid_height"), 1: get_dim("grid_width")},
-            "image_grid_thw":     {0: get_dim("batch_size"), 1: get_dim("time"), 2: get_dim("grid_h"), 3: get_dim("grid_w")},
-            "deepstack_features": {0: get_dim("num_feature_layers"), 1: get_dim("vision_batch_size"), 2: get_dim("vision_size")},
+            "pixel_values": {0: get_dim("grid_height"), 1: get_dim("grid_width")},
+            "image_grid_thw": {
+                0: get_dim("batch_size"),
+                1: get_dim("time"),
+                2: get_dim("grid_h"),
+                3: get_dim("grid_w"),
+            },
+            "deepstack_features": {
+                0: get_dim("num_feature_layers"),
+                1: get_dim("vision_batch_size"),
+                2: get_dim("vision_size"),
+            },
         }
 
         if kv_offload:
             lang_dynamic_shapes = {
-                "input_ids":          {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "position_ids":       {1: get_dim("batch_size"), 2: get_dim("seq_len")},
-                "vision_embeds":      {0: get_dim("vision_batch_size"), 1: get_dim("vision_size")},
-                "deepstack_features": {0: get_dim("num_feature_layers"), 1: get_dim("vision_batch_size"), 2: get_dim("vision_size")},
-                "past_key_values":    [(kv_shape, kv_shape) for _ in range(num_layers)],
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "position_ids": {1: get_dim("batch_size"), 2: get_dim("seq_len")},
+                "vision_embeds": {0: get_dim("vision_batch_size"), 1: get_dim("vision_size")},
+                "deepstack_features": {
+                    0: get_dim("num_feature_layers"),
+                    1: get_dim("vision_batch_size"),
+                    2: get_dim("vision_size"),
+                },
+                "past_key_values": [(kv_shape, kv_shape) for _ in range(num_layers)],
             }
             if continuous_batching:
                 lang_dynamic_shapes["batch_index"] = {0: get_dim("batch_size")}
@@ -1375,10 +1388,14 @@ class QEffQwen3VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneration)
         else:
             flat = {
                 **vision_dynamic_shapes,
-                "input_ids":          {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "position_ids":       {1: get_dim("batch_size"), 2: get_dim("seq_len")},
-                "deepstack_features": {0: get_dim("num_feature_layers"), 1: get_dim("vision_batch_size"), 2: get_dim("vision_size")},
-                "past_key_values":    [(kv_shape, kv_shape) for _ in range(num_layers)],
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "position_ids": {1: get_dim("batch_size"), 2: get_dim("seq_len")},
+                "deepstack_features": {
+                    0: get_dim("num_feature_layers"),
+                    1: get_dim("vision_batch_size"),
+                    2: get_dim("vision_size"),
+                },
+                "past_key_values": [(kv_shape, kv_shape) for _ in range(num_layers)],
             }
             if continuous_batching:
                 flat["batch_index"] = {0: get_dim("batch_size")}

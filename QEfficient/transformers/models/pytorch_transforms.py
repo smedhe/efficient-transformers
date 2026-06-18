@@ -154,6 +154,7 @@ from transformers.models.mistral.modeling_mistral import (
 from transformers.models.mistral3.modeling_mistral3 import (
     Mistral3ForConditionalGeneration,
     Mistral3Model,
+    Mistral3PatchMerger,
     Mistral3RMSNorm,
 )
 from transformers.models.mixtral.modeling_mixtral import (
@@ -194,7 +195,12 @@ from transformers.models.phi3.modeling_phi3 import (
     Phi3Model,
     Phi3RMSNorm,
 )
-from transformers.models.pixtral.modeling_pixtral import PixtralAttentionLayer, PixtralRMSNorm, PixtralVisionModel
+from transformers.models.pixtral.modeling_pixtral import (
+    PixtralAttention,
+    PixtralAttentionLayer,
+    PixtralRMSNorm,
+    PixtralVisionModel,
+)
 from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2Attention,
     Qwen2DecoderLayer,
@@ -304,6 +310,7 @@ from transformers.models.t5.modeling_t5 import (
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2Encoder,
     Wav2Vec2EncoderStableLayerNorm,
+    Wav2Vec2GroupNormConvLayer,
 )
 from transformers.models.whisper.modeling_whisper import (
     WhisperAttention,
@@ -502,6 +509,8 @@ from QEfficient.transformers.models.mistral.modeling_mistral import (
 from QEfficient.transformers.models.mistral3.modeling_mistral3 import (
     QEffMistral3ForConditionalGeneration,
     QEffMistral3Model,
+    QEffMistral3PatchMerger,
+    QEffPixtralAttention,
     QEffPixtralAttentionLayer,
     QEffPixtralVisionModel,
 )
@@ -656,6 +665,7 @@ from QEfficient.transformers.models.t5.modeling_t5 import (
 from QEfficient.transformers.models.wav2vec2.modeling_wav2vec2 import (
     QEffWav2Vec2Encoder,
     QEffWav2Vec2EncoderStableLayerNorm,
+    QEffWav2Vec2GroupNormConvLayer,
 )
 from QEfficient.transformers.models.whisper.modeling_whisper import (
     QEffWhisperAttention,
@@ -703,6 +713,7 @@ class CustomOpsTransform(ModuleMappingTransform):
         GlmMoeDsaRMSNorm: CustomRMSNormAIC,
         Wav2Vec2Encoder: QEffWav2Vec2Encoder,
         Wav2Vec2EncoderStableLayerNorm: QEffWav2Vec2EncoderStableLayerNorm,
+        Wav2Vec2GroupNormConvLayer: QEffWav2Vec2GroupNormConvLayer,
         # BERT-family: replace _create_attention_masks (uses create_bidirectional_mask,
         # which breaks ONNX tracing) with an ONNX-safe _prepare_4d_attention_mask version.
         BertModel: QEffBertModel,
@@ -866,6 +877,7 @@ class KVCacheTransform(ModuleMappingTransform):
         # Mistral3
         Mistral3ForConditionalGeneration: QEffMistral3ForConditionalGeneration,
         Mistral3Model: QEffMistral3Model,
+        Mistral3PatchMerger: QEffMistral3PatchMerger,
         # Mixtral
         MixtralAttention: QEffMixtralAttention,
         MixtralSparseMoeBlock: QEffMixtralSparseMoeBlock,
@@ -960,6 +972,7 @@ class KVCacheTransform(ModuleMappingTransform):
         InternVLVisionLayer: QEffInternVLVisionLayer,
         Llama4VisionEncoderLayer: QEffLlama4VisionEncoderLayer,
         MllamaVisionEncoderLayer: QEffMllamaVisionEncoderLayer,
+        PixtralAttention: QEffPixtralAttention,
         PixtralAttentionLayer: QEffPixtralAttentionLayer,
         Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlock,
         Qwen3VLVisionBlock: QEffQwen3VLVisionBlock,

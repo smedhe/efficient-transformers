@@ -318,6 +318,7 @@ EXPERT_BLOCKING_PACKED_CHUNK_SIZE = int(os.environ.get("EXPERT_BLOCKING_PACKED_C
 
 
 class QEffGemma4TextDecoderLayer(Gemma4TextDecoderLayer):
+    @torch.compiler.nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1116,8 +1117,8 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         batch_dim = "full_batch_size" if continuous_batching else "batch_size"
 
         vision_dynamic_shapes = {
-            "pixel_values":      {0: get_dim("batch_size"), 1: get_dim("max_patches")},
-            "image_position_ids":{0: get_dim("batch_size"), 1: get_dim("max_patches")},
+            "pixel_values": {0: get_dim("batch_size"), 1: get_dim("max_patches")},
+            "image_position_ids": {0: get_dim("batch_size"), 1: get_dim("max_patches")},
         }
 
         past_key_values = []
@@ -1128,11 +1129,11 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
 
         if kv_offload:
             lang_dynamic_shapes = {
-                "input_ids":        {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "vision_embeds":    {0: get_dim("vision_batch_size"), 1: get_dim("vision_tokens")},
-                "position_ids":     {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "mm_token_type_ids":{0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "past_key_values":  past_key_values,
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "vision_embeds": {0: get_dim("vision_batch_size"), 1: get_dim("vision_tokens")},
+                "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "mm_token_type_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "past_key_values": past_key_values,
             }
             if continuous_batching:
                 lang_dynamic_shapes["batch_index"] = {0: get_dim("batch_size")}
@@ -1142,10 +1143,10 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         else:
             flat = {
                 **vision_dynamic_shapes,
-                "input_ids":        {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "position_ids":     {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "mm_token_type_ids":{0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "past_key_values":  past_key_values,
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "mm_token_type_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "past_key_values": past_key_values,
             }
             if continuous_batching:
                 flat["batch_index"] = {0: get_dim("batch_size")}

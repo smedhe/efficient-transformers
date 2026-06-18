@@ -8,13 +8,13 @@
 
 from typing import Dict, List, Optional, Type
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers.models.llava_next.modeling_llava_next import (
     LlavaNextForConditionalGeneration,
     get_anyres_image_grid_shape,
 )
+from transformers.models.siglip.modeling_siglip import SiglipEncoderLayer
 
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo
@@ -30,6 +30,25 @@ class QEffLlavaNextEncoderWrapper(nn.Module):
         self.model = model
         self.model.vision_model = self.model.model.vision_tower
 
+        # Precompute image geometry as Python ints so forward() never reads
+        # data-dependent values from the image_sizes tensor (incompatible with
+        # torch.export symbolic tracing). Image sizes are always fixed at
+        # GRANITEVISION_IMG_SIZE_HEIGHT x GRANITEVISION_IMG_SIZE_WIDTH.
+        img_size = model.config.vision_config.image_size
+        patch_size = model.config.vision_config.patch_size
+        self._tile_hw = img_size // patch_size
+        self._num_patch_height, self._num_patch_width = get_anyres_image_grid_shape(
+            [constants.GRANITEVISION_IMG_SIZE_HEIGHT, constants.GRANITEVISION_IMG_SIZE_WIDTH],
+            model.config.image_grid_pinpoints,
+            img_size,
+        )
+        current_height = self._num_patch_height * self._tile_hw
+        current_width = self._num_patch_width * self._tile_hw
+        scale_factor = current_width / constants.GRANITEVISION_IMG_SIZE_WIDTH
+        new_height = int(round(constants.GRANITEVISION_IMG_SIZE_HEIGHT * scale_factor, 7))
+        self._crop_start = (current_height - new_height) // 2
+        self._crop_end = current_height - self._crop_start
+
     def get_submodules_for_export(self) -> Type[nn.Module]:
         """
         Return the set of class used as the repeated layer across the model for subfunction extraction.
@@ -41,13 +60,18 @@ class QEffLlavaNextEncoderWrapper(nn.Module):
 
     def forward(self, pixel_values, image_sizes):
         if pixel_values.dim() == constants.GRANITEVISION_PIXEL_VALUE_DIM:
-            pixel_values_new = pixel_values.squeeze(0)
+            pixel_values_new = pixel_values[0]
 
         image_feature = self.model.model.vision_tower(pixel_values_new, output_hidden_states=True)
         if isinstance(self.model.config.vision_feature_layer, int):
             selected_image_feature = image_feature.hidden_states[self.model.config.vision_feature_layer]
         else:
-            hs_pool = [image_feature.hidden_states[layer_idx] for layer_idx in self.model.config.vision_feature_layer]
+            num_hidden = len(image_feature.hidden_states)
+            hs_pool = [
+                image_feature.hidden_states[i]
+                for i in self.model.config.vision_feature_layer
+                if -num_hidden <= i < num_hidden
+            ]
             selected_image_feature = torch.cat(hs_pool, dim=-1)
 
         vision_feature_select_strategy = self.model.config.vision_feature_select_strategy
@@ -58,7 +82,7 @@ class QEffLlavaNextEncoderWrapper(nn.Module):
         else:
             raise ValueError(f"Unexpected select feature strategy: {self.model.config.vision_feature_select_strategy}")
         image_features = self.model.model.multi_modal_projector(selected_image_feature)
-        image_features = torch.split(image_features, [image_features.shape[0]], dim=0)
+        image_features = [image_features]
         new_image_features = []
 
         # Image feature
@@ -66,46 +90,14 @@ class QEffLlavaNextEncoderWrapper(nn.Module):
             if image_feature.shape[0] > 1:
                 base_image_feature = image_feature[0]
                 image_feature = image_feature[1:]
-                height = width = (
-                    self.model.config.vision_config.image_size // self.model.config.vision_config.patch_size
-                )
-                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
-                    image_sizes[image_idx],
-                    self.model.config.image_grid_pinpoints,
-                    self.model.config.vision_config.image_size,
-                )
 
-                if (
-                    np.prod(image_feature.shape) % (num_patch_height * num_patch_width * height * width) != 0
-                    and vision_feature_select_strategy == "default"
-                ):
-                    logger.warning_once(
-                        "Image feature shape does not line up with the provided patch size. "
-                        "You may be using the `default` vision_feature_select_strategy with a"
-                        " visual encoder that does not have CLS."
-                    )
-
-                image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
+                image_feature = image_feature.view(
+                    self._num_patch_height, self._num_patch_width, self._tile_hw, self._tile_hw, -1
+                )
                 image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
                 image_feature = image_feature.flatten(1, 2).flatten(2, 3)
 
-                if not isinstance(image_sizes[image_idx], (list, tuple)):
-                    if not isinstance(image_sizes[image_idx], (torch.Tensor, np.ndarray)):
-                        raise TypeError(
-                            f"image_size invalid type: {type(image_sizes[image_idx])} not valid, should be either list, tuple, np.ndarray or tensor"
-                        )
-                original_size = image_sizes[image_idx].tolist()
-                original_height, original_width = original_size
-                current_height, current_width = image_feature.shape[1:]
-
-                if torch.is_tensor(current_height):
-                    current_height = current_height.item()
-                    current_width = current_width.item()
-
-                scale_factor = current_width / original_width
-                new_height = int(round(original_height * scale_factor, 7))
-                padding = (current_height - new_height) // 2
-                image_feature = image_feature[:, padding : current_height - padding, :]
+                image_feature = image_feature[:, self._crop_start : self._crop_end, :]
                 if self.model.model.image_newline is not None:
                     image_feature = torch.cat(
                         (
@@ -164,8 +156,7 @@ class QEffLlavaNextDecoderWrapper(nn.Module):
         indices0 = torch.arange(mask.shape[0]).view(-1, 1)
         image_features_expanded = image_features[indices0, indices1]
         image_inputs_embeds = torch.where(mask.unsqueeze(-1), image_features_expanded, inputs_embeds)
-        # *where to skip image encoder for decode*
-        inputs_embeds = torch.where(input_ids.shape[1] == torch.tensor(1), inputs_embeds, image_inputs_embeds)
+        inputs_embeds = image_inputs_embeds
         outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
@@ -178,6 +169,7 @@ class QEffLlavaNextDecoderWrapper(nn.Module):
         hidden_states = outputs[0][torch.arange(position_ids.shape[0]).view(-1, 1), logit_index]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
+        vision_embeds = vision_embeds.detach().clone()
         return logits, vision_embeds, image_idx, outputs.past_key_values
 
 
@@ -509,9 +501,9 @@ class QEffLlavaNextForConditionalGeneration(LlavaNextForConditionalGeneration):
             elif dim_name == "vision_size":
                 d = Dim(dim_name, min=1, max=65536)
             elif "seq_len" in dim_name:
-                d = Dim(dim_name, min=1, max=4096)
+                d = Dim(dim_name, min=1, max=8000)
             elif "ctx_len" in dim_name:
-                d = Dim(dim_name, min=1, max=4096)
+                d = Dim(dim_name, min=1, max=8000)
             elif "comp_ctx_lengths" in dim_name:
                 d = Dim(dim_name, min=1, max=1024)
             else:
@@ -524,9 +516,6 @@ class QEffLlavaNextForConditionalGeneration(LlavaNextForConditionalGeneration):
         vision_dynamic_shapes = {
             "pixel_values": {
                 0: get_dim("batch_size"),
-                1: get_dim("num_patches"),
-                3: get_dim("img_size"),
-                4: get_dim("img_size"),
             },
             "image_sizes": {
                 0: get_dim("image_size_height"),
@@ -539,11 +528,12 @@ class QEffLlavaNextForConditionalGeneration(LlavaNextForConditionalGeneration):
 
         if kv_offload:
             lang_dynamic_shapes = {
-                "input_ids":     {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "position_ids":  {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
                 "vision_embeds": {0: get_dim("vision_batch_size"), 1: get_dim("vision_size")},
                 "past_key_values": [(key_shape, value_shape) for _ in range(num_layers)],
             }
+            lang_dynamic_shapes["image_idx"] = {0: Dim.STATIC, 1: Dim.STATIC}
             if continuous_batching:
                 lang_dynamic_shapes["batch_index"] = {0: get_dim("batch_size")}
             if comp_ctx_lengths is not None:
@@ -551,8 +541,9 @@ class QEffLlavaNextForConditionalGeneration(LlavaNextForConditionalGeneration):
             return {"vision": vision_dynamic_shapes, "lang": lang_dynamic_shapes}
         else:
             lang_dynamic_shapes = {
-                "input_ids":    {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
                 "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "image_idx": {},
             }
             if continuous_batching:
                 lang_dynamic_shapes["batch_index"] = {0: get_dim("batch_size")}
@@ -594,3 +585,9 @@ class QEffLlavaNextForConditionalGeneration(LlavaNextForConditionalGeneration):
             ),
             IOInfo(name="image_sizes", datatype=torch.int64, shape=(1109, 1610)),
         ]
+
+
+class QEffSiglipEncoderLayer(SiglipEncoderLayer):
+    @torch.compiler.nested_compile_region
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)

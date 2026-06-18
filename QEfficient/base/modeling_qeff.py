@@ -450,8 +450,10 @@ class QEFFBaseModel(ABC):
 
             if use_dynamo:
                 dynamic_axes = None
+                if dynamic_shapes is not None:
+                    dynamic_shapes = dict(dynamic_shapes)
                 export_kwargs = dict(export_kwargs)
-                export_kwargs.setdefault("report", False)
+                export_kwargs.setdefault("report", True)
                 export_kwargs.setdefault("optimize", False)
                 export_kwargs["dynamo"] = True
                 export_kwargs["custom_translation_table"] = {
@@ -506,7 +508,7 @@ class QEFFBaseModel(ABC):
                     rename_map = {old: new for old, new in zip(input_names, aligned_input_names) if old != new}
                     dynamic_axes = {rename_map.get(k, k): v for k, v in dynamic_axes.items()}
                     input_names = aligned_input_names
-                    
+
                 torch.onnx.export(
                     self.model,
                     (example_inputs,),

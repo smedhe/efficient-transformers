@@ -824,7 +824,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_ctx_indices = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-                conv_state = select_interface(CtxGatherFuncCB3D.apply, torch.ops.qefficient.ctx_gather_cb_3d)(conv_state_all, conv_batch_index, conv_ctx_indices)
+                conv_state = select_interface(CtxGatherFuncCB3D.apply, torch.ops.qefficient.ctx_gather_cb_3d)(
+                    conv_state_all, conv_batch_index, conv_ctx_indices
+                )
 
                 recurrent_batch_index = (batch_index if batch_index.ndim == 2 else batch_index.view(-1, 1)).to(
                     recurrent_state_all.device
@@ -852,9 +854,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_position_ids = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-                cache_params.conv_states[self.layer_idx] = select_interface(CtxScatterFuncCB3D.apply, torch.ops.qefficient.ctx_scatter_cb_3d)(
-                    conv_state_all, conv_batch_index, conv_position_ids, new_conv_state
-                )
+                cache_params.conv_states[self.layer_idx] = select_interface(
+                    CtxScatterFuncCB3D.apply, torch.ops.qefficient.ctx_scatter_cb_3d
+                )(conv_state_all, conv_batch_index, conv_position_ids, new_conv_state)
             else:
                 cache_params.conv_states[self.layer_idx] = new_conv_state
         else:
@@ -914,7 +916,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 recurrent_position_ids = torch.arange(
                     recurrent_state_all.shape[2], dtype=torch.int64, device=recurrent_state_all.device
                 )[None, :].expand(recurrent_batch_index.shape[0], -1)
-                cache_params.recurrent_states[self.layer_idx] = select_interface(CtxScatterFuncCB.apply, torch.ops.qefficient.ctx_scatter_cb)(
+                cache_params.recurrent_states[self.layer_idx] = select_interface(
+                    CtxScatterFuncCB.apply, torch.ops.qefficient.ctx_scatter_cb
+                )(
                     recurrent_state_all,
                     recurrent_batch_index,
                     recurrent_position_ids,
@@ -964,6 +968,7 @@ class QEffQwen3_5MoeDecoderLayer(Qwen3_5MoeDecoderLayer):
             self.self_attn.__class__ = QEffQwen3_5MoeAttention
             self.self_attn.__qeff_init__()
 
+    @torch.compiler.nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1991,8 +1996,13 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
         batch_dim = "full_batch_size" if continuous_batching else "batch_size"
 
         vision_dynamic_shapes = {
-            "pixel_values":   {0: get_dim("grid_height"), 1: get_dim("grid_width")},
-            "image_grid_thw": {0: get_dim("batch_size"), 1: get_dim("time"), 2: get_dim("grid_h"), 3: get_dim("grid_w")},
+            "pixel_values": {0: get_dim("grid_height"), 1: get_dim("grid_width")},
+            "image_grid_thw": {
+                0: get_dim("batch_size"),
+                1: get_dim("time"),
+                2: get_dim("grid_h"),
+                3: get_dim("grid_w"),
+            },
         }
 
         past_key_values = []
@@ -2004,7 +2014,7 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
             past_key_values.append((kv_shape, kv_shape))
 
         lang_dynamic_shapes = {
-            "input_ids":    {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+            "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
             "position_ids": {1: get_dim("batch_size"), 2: get_dim("seq_len")},
             "past_key_values": past_key_values,
         }
@@ -2283,16 +2293,22 @@ def _cumsum_scatter_gather_update_expert_blocked(
         packed_stop = packed_start + packed_chunk_size
         chunk_matched_idx = matched_idx[:, packed_start:packed_stop]
 
-        x_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(x_expanded, chunk_matched_idx)
+        x_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(
+            x_expanded, chunk_matched_idx
+        )
 
         gate_prime = x_chunk @ W_g
         up_prime = x_chunk @ W_u
         down_chunk = (up_prime * act_fn(gate_prime)) @ W_d
 
-        rw_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(routing_weight, chunk_matched_idx)
+        rw_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(
+            routing_weight, chunk_matched_idx
+        )
         down_chunk = down_chunk * rw_chunk
 
-        expert_out_chunk = select_interface(CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized)(expert_out, chunk_matched_idx)
+        expert_out_chunk = select_interface(
+            CtxGatherFunc3DGeneralized.apply, torch.ops.qefficient.ctx_gather_3d_generalized
+        )(expert_out, chunk_matched_idx)
         updated_chunk = expert_out_chunk + down_chunk
 
         chunk_valid_rows = torch.clamp(
@@ -2303,7 +2319,9 @@ def _cumsum_scatter_gather_update_expert_blocked(
         updated_chunk = torch.where(
             (row_range < chunk_valid_rows).unsqueeze(-1), updated_chunk, torch.zeros_like(updated_chunk)
         )
-        expert_out = select_interface(CtxScatterFunc3DGeneralized.apply, torch.ops.qefficient.ctx_scatter_3d_generalized)(expert_out, chunk_matched_idx, updated_chunk)
+        expert_out = select_interface(
+            CtxScatterFunc3DGeneralized.apply, torch.ops.qefficient.ctx_scatter_3d_generalized
+        )(expert_out, chunk_matched_idx, updated_chunk)
 
     return expert_out
 

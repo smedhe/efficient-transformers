@@ -44,6 +44,8 @@ if skip_vision:
         aic_enable_depth_first=True,
         skip_vision=True,
         mos=1,
+        use_dynamo=True,
+        use_onnx_subfunctions=True,
     )
 
     messages = [
@@ -88,6 +90,8 @@ else:
         mxint8_kv_cache=True,
         aic_enable_depth_first=True,
         mos=1,
+        use_dynamo=True,
+        use_onnx_subfunctions=True,
     )
 
     ### IMAGE + TEXT ###

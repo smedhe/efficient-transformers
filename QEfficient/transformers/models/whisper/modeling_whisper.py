@@ -86,11 +86,16 @@ class QEffWhisperAttention(WhisperAttention):
                 key_states_new = torch.index_put(key_states_old, indices, key_states)
                 value_states_new = torch.index_put(value_states_old, indices, value_states)
 
-                # Select old or new image KV states based on q_len
-                key_states = torch.where(input_features.shape[2] == torch.tensor(1), key_states_old, key_states_new)
-                value_states = torch.where(
-                    input_features.shape[2] == torch.tensor(1), value_states_old, value_states_new
-                )
+                # Select old or new image KV states based on q_len.
+                # Use new_ones() under dynamo (avoids unserializable FakeTensor constant in
+                # subfunction bodies); use torch.tensor(1) in the legacy TorchScript path
+                # (new_ones() produces extra subfunction outputs that break the rename transform).
+                if torch.compiler.is_compiling():
+                    is_decode = input_features.shape[2] == input_features.new_ones(()).long()
+                else:
+                    is_decode = input_features.shape[2] == torch.tensor(1)
+                key_states = torch.where(is_decode, key_states_old, key_states_new)
+                value_states = torch.where(is_decode, value_states_old, value_states_new)
 
                 past_key_value.layers[self.layer_idx].keys = key_states
                 past_key_value.layers[self.layer_idx].values = value_states
@@ -133,9 +138,10 @@ class QEffWhisperAttention(WhisperAttention):
                 attention_mask = None
             else:
                 # updated to use torch.where, to prevent overflow in fp16 computation
-                attn_weights = torch.where(
-                    attention_mask, torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=torch.float32), attn_weights
+                mask_value = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights.dtype).to(
+                    attn_weights.device
                 )
+                attn_weights = torch.where(attention_mask, mask_value, attn_weights)
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
 
@@ -270,6 +276,24 @@ class QEffWhisperDecoderLayer(WhisperDecoderLayer):
             outputs += (self_attn_weights, cross_attn_weights)
 
         if use_cache:
+            # Under dynamo nested_compile_region, the full multi-layer cache is flattened and
+            # all KV tensors appear as both subgraph inputs and outputs. Layers not computed by
+            # this decoder layer alias their inputs, which invoke_subgraph rejects. Clone all
+            # KV tensors to break the aliasing — but only when compiling, so the legacy
+            # TorchScript export path is unaffected (it would produce duplicate retained state
+            # names if the clones were applied unconditionally).
+            if past_key_value is not None and torch.compiler.is_compiling():
+                for sub_cache in (
+                    getattr(past_key_value, "self_attention_cache", None),
+                    getattr(past_key_value, "cross_attention_cache", None),
+                ):
+                    if sub_cache is None:
+                        continue
+                    for layer in getattr(sub_cache, "layers", []):
+                        if layer.keys is not None:
+                            layer.keys = layer.keys.clone()
+                        if layer.values is not None:
+                            layer.values = layer.values.clone()
             outputs += (past_key_value,)
 
         return outputs
@@ -331,7 +355,13 @@ class QEffWhisperEncoder(WhisperEncoder):
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
 
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
-        embed_pos = self.embed_positions.weight
+        # Dynamo: slice to keep feature_len symbolic so it isn't over-constrained to 3000.
+        # TorchScript: use full weight so (1,1,384) + (1500,384) broadcasts to (1,1500,384),
+        # which gives cross-attention the correct encoder output shape for feature_len=1.
+        if torch.compiler.is_compiling():
+            embed_pos = self.embed_positions.weight[: inputs_embeds.shape[1]]
+        else:
+            embed_pos = self.embed_positions.weight
 
         hidden_states = inputs_embeds + embed_pos
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout)
@@ -804,8 +834,9 @@ class QEffWhisperForConditionalGeneration(WhisperForConditionalGeneration):
         head_dim = self.config.d_model // num_key_value_heads
         num_layers = self.config.num_hidden_layers
 
+        feature_len = encoder_seq_len * 2
         inputs = {
-            "input_features": torch.zeros((bs, encoder_feature_count, 1), dtype=torch.float32),
+            "input_features": torch.zeros((bs, encoder_feature_count, feature_len), dtype=torch.float32),
             "input_ids": torch.zeros((bs, seq_len), dtype=torch.int64),
             "position_ids": torch.arange(seq_len, dtype=torch.int64).view(1, seq_len).repeat(bs, 1),
             "past_key_values": [[] for _ in range(num_layers)],
@@ -915,15 +946,15 @@ class QEffWhisperForConditionalGeneration(WhisperForConditionalGeneration):
 
         dynamic_shapes = {
             "input_features": {0: batch_size, 2: feature_len},
-            "input_ids":      {0: batch_size, 1: seq_len},
-            "position_ids":   {0: batch_size, 1: seq_len},
+            "input_ids": {0: batch_size, 1: seq_len},
+            "position_ids": {0: batch_size, 1: seq_len},
             "past_key_values": [
-                (
+                [
                     {0: batch_size, 2: decoder_ctx_len},  # past_key_self.i
                     {0: batch_size, 2: decoder_ctx_len},  # past_value_self.i
                     {0: batch_size, 2: encoder_ctx_len},  # past_key_cross.i
                     {0: batch_size, 2: encoder_ctx_len},  # past_value_cross.i
-                )
+                ]
                 for _ in range(num_layers)
             ],
         }

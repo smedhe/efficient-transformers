@@ -1201,8 +1201,8 @@ class QEffLlama4ForConditionalGeneration(Llama4ForConditionalGeneration):
 
         if kv_offload:
             lang_dynamic_shapes = {
-                "input_ids":     {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "position_ids":  {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
                 "vision_embeds": {0: get_dim("vision_size")},
                 "past_key_values": past_key_values,
             }
@@ -1213,7 +1213,7 @@ class QEffLlama4ForConditionalGeneration(Llama4ForConditionalGeneration):
             return {"vision": vision_dynamic_shapes, "lang": lang_dynamic_shapes}
         else:
             lang_dynamic_shapes = {
-                "input_ids":    {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
                 "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
             }
             if continuous_batching:

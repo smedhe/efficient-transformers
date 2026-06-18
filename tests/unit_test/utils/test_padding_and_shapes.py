@@ -185,7 +185,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        updated_inputs, _, _ = get_sampling_inputs_and_outputs(
+        updated_inputs, _, _, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
@@ -202,7 +202,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        updated_inputs, _, _ = get_sampling_inputs_and_outputs(
+        updated_inputs, _, _, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
@@ -219,7 +219,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        updated_inputs, _, _ = get_sampling_inputs_and_outputs(
+        updated_inputs, _, _, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
@@ -236,7 +236,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        updated_inputs, _, _ = get_sampling_inputs_and_outputs(
+        updated_inputs, _, _, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
@@ -253,7 +253,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        updated_inputs, _, _ = get_sampling_inputs_and_outputs(
+        updated_inputs, _, _, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
@@ -270,7 +270,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        _, updated_output_names, _ = get_sampling_inputs_and_outputs(
+        _, updated_output_names, _, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
@@ -289,7 +289,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        updated_inputs, _, _ = get_sampling_inputs_and_outputs(
+        updated_inputs, _, _, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
@@ -306,7 +306,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        _, _, updated_axes = get_sampling_inputs_and_outputs(
+        _, _, updated_axes, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
@@ -326,7 +326,7 @@ class TestSamplerUtils:
         dynamic_axes = self._make_base_dynamic_axes()
         qaic_config = {"max_top_k_ids": 512}
 
-        updated_inputs, _, _ = get_sampling_inputs_and_outputs(
+        updated_inputs, _, _, _ = get_sampling_inputs_and_outputs(
             example_inputs=inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,

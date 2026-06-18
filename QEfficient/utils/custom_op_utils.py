@@ -77,13 +77,46 @@ def ctx_gather_op(data: torch.Tensor, ctx_indices: torch.Tensor, comp_ctx_len: i
     return data[batch_indices, head_indices, ctx_indices]
 
 
+# @ctx_gather_op.register_fake
+# def _(
+#     data: torch.Tensor,
+#     ctx_indices: torch.Tensor,
+#     comp_ctx_len: int,
+# ) -> torch.Tensor:
+#     # Output shape: (batch, heads, comp_ctx_len, head_dim)
+#     # axis 2 is the gathered context dimension, which becomes comp_ctx_len
+#     # not data.shape[2] (the original full context length).
+#     out_shape = (data.shape[0], data.shape[1], comp_ctx_len, *data.shape[3:])
+#     return torch.empty(out_shape, dtype=data.dtype, device=data.device)
+
+
 @ctx_gather_op.register_fake
 def _(
     data: torch.Tensor,
     ctx_indices: torch.Tensor,
     comp_ctx_len: int,
 ) -> torch.Tensor:
-    return torch.empty_like(data)
+    """
+    Fake kernel for shape inference.
+
+    Use ctx_indices when available (true PyTorch behavior),
+    but fall back to comp_ctx_len if needed (ONNX contract).
+    """
+
+    # Prefer actual indexing size when known
+    gather_dim = ctx_indices.shape[-1] if ctx_indices.shape[-1] is not None else comp_ctx_len
+    out_shape = (
+        data.shape[0],
+        data.shape[1],
+        gather_dim,
+        *data.shape[3:],
+    )
+
+    return torch.empty(
+        out_shape,
+        dtype=data.dtype,
+        device=data.device,
+    )
 
 
 # SCATTER CB (4D with heads, context, etc.)
@@ -278,9 +311,7 @@ def _(data: torch.Tensor, batch_index: torch.Tensor, ctx_indices: torch.Tensor) 
 
 # SCATTER 3D INT (builds packed->original index table; outputs INT32)
 @torch.library.custom_op("qefficient::ctx_scatter_3d_int", mutates_args=())
-def ctx_scatter_3d_int_op(
-    data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor
-) -> torch.Tensor:
+def ctx_scatter_3d_int_op(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     """Custom 3D INT32 scatter. Semantics: same as CtxScatterFunc3DInt.forward."""
     result = data.clone()
     valid = position_ids != torch.iinfo(torch.int32).max

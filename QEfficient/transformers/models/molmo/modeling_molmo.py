@@ -158,7 +158,9 @@ class QEffMolmoRotaryEmbedding(nn.Module):
         self.inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float) / dim))
         self.original_max_seq_len = config.max_position_embeddings or config.max_sequence_length
         self._set_cos_sin_cache(
-            seq_len=self.original_max_seq_len, device=_non_meta_init_device(config), dtype=config.torch_dtype
+            seq_len=self.original_max_seq_len,
+            device=_non_meta_init_device(config),
+            dtype=getattr(config, "torch_dtype", torch.float32),
         )
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
@@ -575,6 +577,7 @@ class QEffMolmoEncoderWrapper(nn.Module):
             Downstream code can use this to find/build subfunctions for repeated blocks.
         """
         return {self.model.model.transformer.blocks[0].__class__}
+
     def forward(self, pixel_values, image_masks, image_input_idx, valid_idx):
         image_features, _ = self.model.model.vision_backbone(pixel_values, image_masks)
         num_image, num_patch = image_features.shape[1:3]
@@ -947,7 +950,7 @@ class QEffMolmoModel(nn.Module):
         batch_dim = "full_batch_size" if continuous_batching else "batch_size"
 
         vision_dynamic_shapes = {
-            "pixel_values":    {
+            "pixel_values": {
                 0: get_dim("batch_size"),
                 1: get_dim("num_images"),
                 2: get_dim("img_tile"),
@@ -958,12 +961,12 @@ class QEffMolmoModel(nn.Module):
                 1: get_dim("num_images"),
                 2: get_dim("num_patch"),
             },
-            "image_masks":     {
+            "image_masks": {
                 0: get_dim("batch_size"),
                 1: get_dim("num_images"),
                 2: get_dim("img_tile"),
             },
-            "valid_idx":       {
+            "valid_idx": {
                 0: get_dim("batch_size"),
                 1: get_dim("valid_size"),
             },
@@ -974,8 +977,8 @@ class QEffMolmoModel(nn.Module):
 
         if kv_offload:
             lang_dynamic_shapes = {
-                "input_ids":     {0: get_dim("batch_size"), 1: get_dim("seq_len")},
-                "position_ids":  {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
                 "vision_embeds": {0: get_dim("vision_batch_size"), 1: get_dim("valid_size")},
                 "past_key_values": [(key_shape, value_shape) for _ in range(num_layers)],
             }
@@ -986,7 +989,7 @@ class QEffMolmoModel(nn.Module):
             return {"vision": vision_dynamic_shapes, "lang": lang_dynamic_shapes}
         else:
             lang_dynamic_shapes = {
-                "input_ids":    {0: get_dim("batch_size"), 1: get_dim("seq_len")},
+                "input_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
                 "position_ids": {0: get_dim("batch_size"), 1: get_dim("seq_len")},
             }
             if continuous_batching:

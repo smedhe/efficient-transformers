@@ -22,9 +22,10 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
 
 from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKV, CtxScatterFunc3DGeneralized
-from QEfficient.transformers.cache_utils import QEffDynamicCache, QEffDynamicCompressedKVRopeCache
+from QEfficient.transformers.cache_utils import InvalidIndexProvider, QEffDynamicCache, QEffDynamicCompressedKVRopeCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.custom_op_utils import select_interface
 
 
 class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
@@ -57,7 +58,9 @@ class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
         if indexer_key_cache is not None:
             invalid_scatter_index = torch.iinfo(torch.int32).max
             cache_positions = torch.where(position_ids < 0, invalid_scatter_index, position_ids).to(torch.int32)
-            indexer_key_cache = CtxScatterFunc3DGeneralized.apply(indexer_key_cache, cache_positions, k)
+            indexer_key_cache = select_interface(
+                CtxScatterFunc3DGeneralized.apply, torch.ops.qefficient.ctx_scatter_3d_generalized
+            )(indexer_key_cache, cache_positions, k)
             k_cached = indexer_key_cache
         else:
             if seq_len > 1:
@@ -150,11 +153,15 @@ def _gather_dsa_sparse_cache(
     layer = compressed_kvs.layers[layer_idx]
     batch, num_kv_heads, _, _ = layer.ckv.shape
     gather_indices = topk_indices[:, -1, :].unsqueeze(1).expand(batch, num_kv_heads, -1)
-    invalid_idx_value = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
+    invalid_idx_value = InvalidIndexProvider._get_invalid_idx_value()
     gather_indices = torch.where(valid_topk[:, -1, :].unsqueeze(1), gather_indices, invalid_idx_value).to(torch.int32)
 
-    ckv = CtxGatherFuncBlockedKV.apply(layer.ckv, gather_indices)
-    k_pe = CtxGatherFuncBlockedKV.apply(layer.k_pe, gather_indices)
+    ckv = select_interface(CtxGatherFuncBlockedKV.apply, torch.ops.qefficient.ctx_gather_blocked_kv)(
+        layer.ckv, gather_indices
+    )
+    k_pe = select_interface(CtxGatherFuncBlockedKV.apply, torch.ops.qefficient.ctx_gather_blocked_kv)(
+        layer.k_pe, gather_indices
+    )
     invalid_mask = ~valid_topk[:, -1, :].unsqueeze(1).unsqueeze(-1)
     ckv = torch.where(invalid_mask, torch.zeros(1, dtype=ckv.dtype, device=ckv.device), ckv)
     k_pe = torch.where(invalid_mask, torch.zeros(1, dtype=k_pe.dtype, device=k_pe.device), k_pe)
@@ -457,6 +464,7 @@ class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
 
 
 class QEffGlmMoeDsaDecoderLayer(GlmMoeDsaDecoderLayer):
+    @torch.compiler.nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,

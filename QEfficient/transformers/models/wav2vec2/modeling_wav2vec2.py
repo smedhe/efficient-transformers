@@ -23,7 +23,36 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2Encoder,
     Wav2Vec2EncoderStableLayerNorm,
+    Wav2Vec2GroupNormConvLayer,
 )
+
+
+class QEffWav2Vec2GroupNormConvLayer(Wav2Vec2GroupNormConvLayer):
+    """
+    Replaces nn.GroupNorm(num_groups=C, num_channels=C) with a manual
+    instance-norm implementation using Mean/Var/Mul/Add primitives.
+
+    When num_groups==num_channels, the dynamo ONNX translator lowers
+    aten.group_norm to InstanceNormalization and reconstructs the weight/bias
+    via Expand ops rather than emitting them as static initializers. QAIC
+    compiler cannot constant-fold those Expand nodes ('could not find constant
+    val_22'). Using primitive ops avoids aten.group_norm entirely so the
+    weight/bias appear as plain initializer tensors in the ONNX graph.
+    """
+
+    def forward(self, hidden_states):
+        hidden_states = self.conv(hidden_states)
+        # Manual instance norm: normalize each (batch, channel) slice over T.
+        # hidden_states: (B, C, T)
+        mean = hidden_states.mean(dim=2, keepdim=True)
+        var = hidden_states.var(dim=2, keepdim=True, unbiased=False)
+        hidden_states = (hidden_states - mean) / (var + self.layer_norm.eps).sqrt()
+        # Apply affine parameters — view keeps them as static initializer refs in ONNX.
+        weight = self.layer_norm.weight.view(1, -1, 1)
+        bias = self.layer_norm.bias.view(1, -1, 1)
+        hidden_states = hidden_states * weight + bias
+        hidden_states = self.activation(hidden_states)
+        return hidden_states
 
 
 class QEffWav2Vec2Encoder(Wav2Vec2Encoder):

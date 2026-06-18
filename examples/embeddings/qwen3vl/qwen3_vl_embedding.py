@@ -135,6 +135,8 @@ def main() -> None:
         num_cores=args.num_cores,
         num_devices=args.num_devices,
         mxfp6_matmul=args.mxfp6_matmul,
+        use_dynamo=True,
+        use_onnx_subfunctions=True,
     )
 
     # 5) Run AI100 embedding generation on precompiled QPCs.

@@ -50,7 +50,7 @@ def main():
     qeff_model = QEFFAutoModelForSpeechSeq2Seq.from_pretrained(args.model_name)
 
     ## STEP 3 -- export and compile model
-    qeff_model.compile(num_cores=args.num_cores)
+    qeff_model.compile(num_cores=args.num_cores, use_dynamo=True, use_onnx_subfunctions=True)
 
     ## STEP 4 -- generate output for loaded input and processor
     exec_info = qeff_model.generate(

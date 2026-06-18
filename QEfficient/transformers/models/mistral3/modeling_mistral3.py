@@ -17,11 +17,15 @@ from transformers.models.mistral3.modeling_mistral3 import (
     Mistral3ForConditionalGeneration,
     Mistral3Model,
     Mistral3ModelOutputWithPast,
+    Mistral3PatchMerger,
 )
 from transformers.models.pixtral.modeling_pixtral import (
+    ALL_ATTENTION_FUNCTIONS,
+    PixtralAttention,
     PixtralAttentionLayer,
     PixtralVisionModel,
-    position_ids_in_meshgrid,
+    apply_rotary_pos_emb,
+    eager_attention_forward,
 )
 
 from QEfficient.utils import constants
@@ -29,14 +33,60 @@ from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.logging_utils import logger
 
 
-def custom_cumsum(tensor):
-    dim = 0
-    result = torch.zeros_like(tensor)
-    indices = [slice(None)] * tensor.dim()
-    for i in range(tensor.size(dim)):
-        indices[dim] = slice(0, i + 1)
-        result.select(dim, i).copy_(tensor[tuple(indices)].sum(dim))
-    return result
+class QEffMistral3PatchMerger(Mistral3PatchMerger):
+    def forward(self, image_features: torch.Tensor, image_sizes: torch.Tensor) -> torch.Tensor:
+        image_sizes = [
+            (image_size[0] // self.patch_size, image_size[1] // self.patch_size) for image_size in image_sizes
+        ]
+        tokens_per_image = [h * w for h, w in image_sizes]
+        d = image_features.shape[-1]
+
+        permuted_tensor = []
+        for image_index, image_tokens in enumerate(image_features.split(tokens_per_image)):
+            h, w = image_sizes[image_index]
+            image_grid = image_tokens.view(h, w, d).permute(2, 0, 1).unsqueeze(0)
+            if torch._dynamo.is_compiling():
+                torch._check(image_grid.shape[2] != 0)
+                torch._check(image_grid.shape[3] != 0)
+                torch._check((image_grid.shape[2] // self.spatial_merge_size) > 0)
+                torch._check((image_grid.shape[3] // self.spatial_merge_size) > 0)
+            grid = torch.nn.functional.unfold(
+                image_grid, kernel_size=self.spatial_merge_size, stride=self.spatial_merge_size
+            )
+            grid = grid.view(d * self.spatial_merge_size**2, -1).t()
+            permuted_tensor.append(grid)
+
+        image_features = torch.cat(permuted_tensor, dim=0)
+        image_features = self.merging_layer(image_features)
+        return image_features
+
+
+def qeff_position_ids_in_meshgrid(patch_embeds_list, max_width):
+    """
+    Drop-in for HF's position_ids_in_meshgrid that avoids creating new unbacked
+    symbols.  The HF version does:
+        height, width = patch.shape[-2:]          # Python SymInts
+        torch.arange(height), torch.arange(width) # each creates a NEW symbol
+    torch.arange on a detached SymInt creates a fresh unbacked symbol that is
+    separate from the one already tracked for that shape dimension.  Those extra
+    symbols leak into invoke_subgraph inputs but never appear in its outputs,
+    causing PendingUnbackedSymbolNotFound.
+
+    Fix: call torch.arange with the raw shape expression obtained from
+    torch.ops.aten.sym_size so the tracer reuses the existing tracked symbol
+    rather than minting a new one.
+    """
+    positions = []
+    for patch in patch_embeds_list:
+        h = torch.ops.aten.sym_size(patch, len(patch.shape) - 2)
+        w = torch.ops.aten.sym_size(patch, len(patch.shape) - 1)
+        h_range = torch.arange(h, device=patch.device)
+        w_range = torch.arange(w, device=patch.device)
+        mesh = torch.meshgrid(h_range, w_range, indexing="ij")
+        h_grid, v_grid = torch.stack(mesh, dim=-1).reshape(-1, 2).chunk(2, -1)
+        ids = h_grid * max_width + v_grid
+        positions.append(ids[:, 0])
+    return torch.cat(positions)
 
 
 def qeff_generate_block_attention_mask(patch_embeds_list, tensor):
@@ -44,19 +94,28 @@ def qeff_generate_block_attention_mask(patch_embeds_list, tensor):
     device = tensor.device
     seq_len = tensor.shape[1]
     d_min = torch.finfo(dtype).min
-    causal_mask = torch.full((seq_len, seq_len), fill_value=d_min, dtype=dtype, device=device)
-    block_end_idx = torch.tensor(patch_embeds_list).cumsum(-1)
-    block_end_idx = custom_cumsum(torch.tensor(patch_embeds_list))
-    block_start_idx = custom_cumsum(torch.tensor([0] + patch_embeds_list[:-1]))
-    for start, end in zip(block_start_idx.tolist(), block_end_idx.tolist()):
-        torch._check(start >= 0)
-        torch._check(end >= 0)
-        torch._check(start <= 48400)
-        torch._check(end >= start)
-        torch._check(end <= 48400)
-        causal_mask[start:end, start:end] = 0
-    causal_mask = causal_mask[None, None, :, :].expand(tensor.shape[0], 1, -1, -1)
-    return causal_mask
+
+    # Compute per-image token counts symbolically: torch.tensor([h, w]).prod() avoids
+    # Python-level SymInt multiplication (u1*u3) which triggers GuardOnDataDependentSymNode
+    # when torch.as_tensor tries to specialize it to a concrete integer.
+    counts = torch.stack(
+        [torch.tensor([p.shape[-2], p.shape[-1]], dtype=torch.int64, device=device).prod() for p in patch_embeds_list]
+    )
+    block_end = counts.cumsum(0)
+    block_start = block_end - counts
+
+    # Build mask via broadcasting — no Python-level loop over unbacked scalars.
+    rows = torch.arange(seq_len, device=device).view(1, 1, seq_len, 1)
+    cols = torch.arange(seq_len, device=device).view(1, 1, 1, seq_len)
+    s = block_start.view(-1, 1, 1, 1)
+    e = block_end.view(-1, 1, 1, 1)
+    in_block = (rows >= s) & (rows < e) & (cols >= s) & (cols < e)
+    causal_mask = torch.where(
+        in_block.any(0),
+        torch.zeros(1, 1, seq_len, seq_len, dtype=dtype, device=device),
+        torch.full((1, 1, seq_len, seq_len), d_min, dtype=dtype, device=device),
+    )
+    return causal_mask.expand(tensor.shape[0], 1, -1, -1)
 
 
 class QEffPixtralVisionModel(PixtralVisionModel):
@@ -87,14 +146,12 @@ class QEffPixtralVisionModel(PixtralVisionModel):
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
-        position_ids = position_ids_in_meshgrid(
+        position_ids = qeff_position_ids_in_meshgrid(
             patch_embeds_list, max_width=self.config.image_size // self.config.patch_size
         )
         position_embeddings = self.patch_positional_embedding(patch_embeds, position_ids)
 
-        attention_mask = qeff_generate_block_attention_mask(
-            [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds
-        )
+        attention_mask = qeff_generate_block_attention_mask(patch_embeds_list, patch_embeds)
 
         out = self.transformer(
             patch_embeds,
@@ -229,6 +286,7 @@ class QEFFMistral3DecoderWrapper(nn.Module):
             This method should return the *class object* (not an instance).
             Downstream code can use this to find/build subfunctions for repeated blocks.
         """
+        print(self.model.model.language_model.layers[0].__class__)
         return {self.model.model.language_model.layers[0].__class__}
 
     def forward(
@@ -751,6 +809,51 @@ class QEffMistral3ForConditionalGeneration(Mistral3ForConditionalGeneration):
                 shape=("batch_size", 3, "image_size", "image_size"),
             ),
         ]
+
+
+class QEffPixtralAttention(PixtralAttention):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask=None,
+        position_embeddings=None,
+        **kwargs,
+    ):
+        # Avoid tuple-unpack of hidden_states.size() which creates fresh unbacked
+        # symbols when the decomposition pass re-traces this subgraph in isolation.
+        # Use shape indexing so the existing tracked SymInts flow through unchanged.
+        batch_size = hidden_states.shape[0]
+        patches = hidden_states.shape[1]
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(batch_size, patches, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(batch_size, patches, self.num_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, patches, self.num_heads, self.head_dim).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=0)
+
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.dropout,
+            scaling=self.scaling,
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(batch_size, patches, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
 
 
 class QEffPixtralAttentionLayer(PixtralAttentionLayer):

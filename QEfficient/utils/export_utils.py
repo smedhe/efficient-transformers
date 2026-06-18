@@ -29,7 +29,6 @@ from QEfficient.utils.logging_utils import logger
 from QEfficient.utils.torch_patches import (
     apply_torch_patches,
     temporarily_disable_nested_compile_regions,
-    temporarily_enable_nested_compile_regions,
     undo_torch_patches,
 )
 
@@ -175,33 +174,41 @@ def export_wrapper(func):
         export_context = nullcontext()
         subfunction_setup_done = False
 
-        decoder_layer_classes = get_decoder_layer_classes_for_export(self.model)
-
         try:
             # 1. Setup the requested export mode
             if use_onnx_subfunctions:
-                args, kwargs = _setup_onnx_subfunctions(self, args, kwargs)
+                if use_dynamo:
+                    # Path 4: dynamo + subfunctions.
+                    # The @nested_compile_region decorator is already statically present
+                    # on each decoder layer's forward() method — dynamo will naturally
+                    # emit repeated_subgraph* functions without any dynamic patching.
+                    # Derive target_classnames directly from get_submodules_for_export()
+                    # on the model so RenameRepeatedSubgraphTransform can rename them.
+                    submodule_classes = getattr(self.model, "get_submodules_for_export", lambda: set())()
+                    target_classnames = sorted(cls.__name__ for cls in (submodule_classes or []))
+                    args, kwargs = _setup_onnx_subfunctions(self, args, kwargs, target_classnames=target_classnames)
+                else:
+                    # Path 2: TorchScript + subfunctions.
+                    # Needs the actual class objects for export_modules_as_functions.
+                    decoder_layer_classes = get_decoder_layer_classes_for_export(self.model)
+                    args, kwargs = _setup_onnx_subfunctions(
+                        self, args, kwargs, decoder_layer_classes=decoder_layer_classes
+                    )
                 subfunction_setup_done = True
 
-                # Enable nested compile regions when using dynamo + subfunctions
-                if use_dynamo and decoder_layer_classes:
-                    export_context = temporarily_enable_nested_compile_regions(
-                        self.model, decoder_layer_classes
-                    )
-
             elif use_dynamo:
-                # Disable nested compile regions for standard dynamo export
-                export_context = temporarily_disable_nested_compile_regions(
-                    self.model, decoder_layer_classes
-                )
+                # Path 3: flat dynamo — strip any @nested_compile_region decorators that
+                # are statically present on decoder layer forward() methods so they don't
+                # create subgraph boundaries during tracing.
+                # target_classes=None: the function identifies wrapped methods by qualname,
+                # no class filter needed.
+                export_context = temporarily_disable_nested_compile_regions(self.model, target_classes=None)
 
             # 2. Prepare export directory
             export_dir = _prepare_export_directory(self, kwargs)
 
             # 3. Generate hash and finalize export directory path
-            export_hash, filtered_hash_params = _generate_export_hash(
-                self, args, kwargs, func
-            )
+            export_hash, filtered_hash_params = _generate_export_hash(self, args, kwargs, func)
             export_dir = export_dir.with_name(export_dir.name + "-" + export_hash)
 
             kwargs["export_dir"] = export_dir
@@ -223,9 +230,7 @@ def export_wrapper(func):
                     # leaving CtxScatter nodes at top level with _RetainedState
                     # input names that the ORT runner doesn't know to feed.
                     dynamo_patch = (
-                        torch._dynamo.config.patch(
-                            inline_single_use_invoke_subgraph=False
-                        )
+                        torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
                         if use_onnx_subfunctions and use_dynamo
                         else nullcontext()
                     )
@@ -234,7 +239,7 @@ def export_wrapper(func):
                         onnx_path = func(self, *args, **kwargs)
 
             except Exception as export_exc:
-                if use_onnx_subfunctions and use_dynamo and decoder_layer_classes:
+                if use_onnx_subfunctions and use_dynamo:
                     raise RuntimeError(
                         "Export failed with use_dynamo=True and use_onnx_subfunctions=True "
                         "while nested compile regions were enabled for repeated-subgraph "
@@ -338,7 +343,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     return export_hash, filtered_hash_params
 
 
-def _setup_onnx_subfunctions(qeff_model, args, kwargs):
+def _setup_onnx_subfunctions(qeff_model, args, kwargs, decoder_layer_classes=None, target_classnames=None):
     """
     Setup ONNX subfunction export environment.
 
@@ -347,11 +352,18 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs):
     - Applies necessary torch patches
     - Modifies output names for subfunction compatibility
     - Adds subfunction-specific ONNX transforms
-    - Updates export kwargs with module classes
+    - Updates export kwargs with module classes (TorchScript path) or
+      target class names (dynamo path)
 
     Args:
         qeff_model: The QEff model instance
-        kwargs: Export keyword arguments (modified in-place).
+        args: Positional arguments to the export function
+        kwargs: Export keyword arguments (modified in-place)
+        decoder_layer_classes: Class objects for TorchScript export_modules_as_functions
+                               (Path 2: dynamo=False, subfunc=True)
+        target_classnames: Sorted list of class name strings for RenameRepeatedSubgraphTransform
+                           (Path 4: dynamo=True, subfunc=True); derived from
+                           get_submodules_for_export() by the caller
     """
     warnings.warn(
         "The subfunction feature is experimental. Please note that using compile "
@@ -373,7 +385,13 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs):
             kwargs["output_names"] = [
                 re.sub("_RetainedState", "_InternalRetainedState", name)
                 if name.endswith("_RetainedState")
-                and ("key" in name or "value" in name or "compressed_kv" in name or "k_pe" in name or "indexer_key_cache" in name)
+                and (
+                    "key" in name
+                    or "value" in name
+                    or "compressed_kv" in name
+                    or "k_pe" in name
+                    or "indexer_key_cache" in name
+                )
                 else name
                 for name in kwargs["output_names"]
             ]
@@ -391,16 +409,20 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs):
         qeff_model._onnx_transforms.append(RenameFunctionOutputsTransform)
         qeff_model._onnx_transforms.append(CustomOpTransform)
 
-    # TODO: Handle this in the modelling class QEFFTransformersBase, remove from here.
-    decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)
-    if decoder_layer_classes:
-        if use_dynamo:
-            target_classnames = sorted(cls.__name__ for cls in decoder_layer_classes)
+    # Wire up class information for each path.
+    # Path 4 (dynamo=True): pass target_classnames so RenameRepeatedSubgraphTransform
+    #   can rename repeated_subgraph* → actual decoder layer class names.
+    #   Derived by the caller from model.get_submodules_for_export() directly.
+    # Path 2 (dynamo=False): pass decoder_layer_classes so TorchScript exporter
+    #   groups those modules as ONNX functions via export_modules_as_functions.
+    if use_dynamo:
+        if target_classnames:
             qeff_model._subfunction_target_classnames = target_classnames
             onnx_transform_kwargs = dict(kwargs.get("onnx_transform_kwargs") or {})
             onnx_transform_kwargs["target_classnames"] = target_classnames
             kwargs["onnx_transform_kwargs"] = onnx_transform_kwargs
-        else:
+    else:
+        if decoder_layer_classes:
             kwargs["export_modules_as_functions"] = decoder_layer_classes
     return args, kwargs
 
