@@ -32,7 +32,7 @@ from transformers import (
 
 import QEfficient
 from QEfficient.base.modeling_qeff import QEFFBaseModel
-from QEfficient.base.onnx_transforms import FP16ClipTransform, RewriteUnsupportedOpsTransform, SplitTensorsTransform
+from QEfficient.base.onnx_transforms import FP16ClipTransform, RewriteUnsupportedOpsTransform
 from QEfficient.base.pytorch_transforms import SplitGateUpWeightsTransform
 from QEfficient.generation.cloud_infer import QAICInferenceSession, is_retained_state_name
 from QEfficient.generation.text_generation_inference import (
@@ -929,7 +929,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
         """
         return self.model.config.__dict__
 
-    def export(self, export_dir: Optional[str] = None, **kwargs) -> str:
+    def export(self, export_dir: Optional[str] = None, use_dynamo: bool = False, **kwargs) -> str:
         """
         Export the model to ONNX format using ``torch.onnx.export``.
 
@@ -961,12 +961,25 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
 
         output_names = ["logits"]
 
+        dynamic_shapes = None
+        if use_dynamo:
+            from torch.export import Dim
+            max_seq_len = getattr(self.model.config, "max_position_embeddings", 512)
+            batch_size = Dim("batch_size", min=1, max=64)
+            seq_len_dim = Dim("seq_len", min=1, max=max_seq_len)
+            dynamic_shapes = {
+                "input_ids":      {0: batch_size, 1: seq_len_dim},
+                "attention_mask": {0: batch_size, 1: seq_len_dim},
+            }
+
         return self._export(
             example_inputs,
             output_names,
             dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             export_dir=export_dir,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+            use_dynamo=use_dynamo,
         )
 
     def compile(
@@ -980,6 +993,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
         num_cores: int = 16,
         mxfp6_matmul: bool = False,
         use_onnx_subfunctions: bool = False,
+        use_dynamo: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -1040,6 +1054,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
             mdp_ts_num_devices=num_devices,
             aic_num_cores=num_cores,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            use_dynamo=use_dynamo,
             **compiler_options,
         )
 
@@ -4972,7 +4987,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         """
         return self.model.config.__dict__
 
-    def export(self, export_dir: Optional[str] = None, **kwargs) -> str:
+    def export(self, export_dir: Optional[str] = None, use_dynamo: bool = False, **kwargs) -> str:
         """
         Export the model to ONNX format using ``torch.onnx.export``.
 
@@ -4995,12 +5010,15 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         inputs = self.model.get_dummy_inputs()
         dynamic_axes = self.model.get_onnx_dynamic_axes()
         output_names = self.model.get_output_names()
+        dynamic_shapes = self.model.get_onnx_dynamic_shapes() if use_dynamo else None
         return self._export(
             inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             export_dir=export_dir,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+            use_dynamo=use_dynamo,
         )
 
     def compile(
@@ -5020,6 +5038,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         mxint8_kv_cache: bool = False,
         num_speculative_tokens: Optional[int] = None,
         use_onnx_subfunctions: bool = False,
+        use_dynamo: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -5130,6 +5149,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
             aic_num_cores=num_cores,
             custom_io=custom_io,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            use_dynamo=use_dynamo,
             **compiler_options,
         )
 
@@ -5362,7 +5382,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
     def get_model_config(self) -> dict:
         return self.model.config.__dict__
 
-    def export(self, export_dir: Optional[str] = None, **kwargs) -> str:
+    def export(self, export_dir: Optional[str] = None, use_dynamo: bool=False, **kwargs) -> str:
         """
         Exports the model to ``ONNX`` format using ``torch.onnx.export``.
 
@@ -5385,12 +5405,23 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
 
         output_names = ["logits"]
 
+        dynamic_shapes = None
+        if use_dynamo:
+            from torch.export import Dim
+            batch_size = Dim("batch_size", min=1, max=64)
+            seq_len_dim = Dim("seq_len", min=1, max=constants.WAV2VEC2_MAX_SEQ_LEN)
+            dynamic_shapes = {
+                "input_values": {0: batch_size, 1: seq_len_dim},
+            }
+
         return self._export(
             example_inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             export_dir=export_dir,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+            use_dynamo=use_dynamo,
         )
 
     def compile(
@@ -5404,6 +5435,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
         num_cores: int = 16,  # FIXME: Make this mandatory arg
         mxfp6_matmul: bool = False,
         use_onnx_subfunctions: bool = False,
+        use_dynamo: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -5455,6 +5487,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
             mdp_ts_num_devices=num_devices,
             aic_num_cores=num_cores,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            use_dynamo=use_dynamo,
             **compiler_options,
         )
 
