@@ -7,8 +7,8 @@
 
 """PyTorch Mllama model."""
 
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import warnings
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch.nn.functional as F

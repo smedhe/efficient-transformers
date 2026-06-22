@@ -34,7 +34,6 @@ import torch.onnx.utils as onnx_utils
 from torch import _C
 from torch.onnx._internal.torchscript_exporter import utils as ts_utils
 
-
 _original_setup_trace_module_map = onnx_utils._setup_trace_module_map
 _original_get_module_attributes = getattr(onnx_utils, "_get_module_attributes", None)
 _original_track_scope_attrs = getattr(_C, "_jit_pass_onnx_track_scope_attributes", None)

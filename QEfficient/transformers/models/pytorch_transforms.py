@@ -291,8 +291,8 @@ from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     Qwen3VLMoeVisionBlock,
     Qwen3VLMoeVisionModel,
 )
-from transformers.models.siglip.modeling_siglip import SiglipEncoderLayer
 from transformers.models.roberta.modeling_roberta import RobertaModel
+from transformers.models.siglip.modeling_siglip import SiglipEncoderLayer
 from transformers.models.starcoder2.modeling_starcoder2 import (
     Starcoder2Attention,
     Starcoder2DecoderLayer,

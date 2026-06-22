@@ -15,6 +15,10 @@ import numpy as np
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+from QEfficient.utils.run_utils import ApiRunner
+from scripts.memory_profiling import QEffMemoryProfiler
+
 
 def _add_repo_root_to_path() -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -24,10 +28,6 @@ def _add_repo_root_to_path() -> None:
 
 
 _add_repo_root_to_path()
-
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-from QEfficient.utils.run_utils import ApiRunner
-from scripts.memory_profiling import QEffMemoryProfiler
 
 
 def _str_to_bool(value: str) -> bool:
