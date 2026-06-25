@@ -1534,6 +1534,8 @@ def test_whisper_repeated_subfunction_export_smoke(tmp_path):
         qeff_model.export(tmp_path / "whisper-repeated", use_dynamo=True, use_onnx_subfunctions=True)
     )
     _assert_repeated_block_functions(onnx_path, expected)
+
+
 # ---------------------------------------------------------------------------
 # Layer-wise export (provisional, scheduled for deprecation)
 # ---------------------------------------------------------------------------
@@ -1959,6 +1961,7 @@ def test_vlm_text_side_repeated_subfunction_export(vlm_name, model_id, tmp_path)
     )
     _assert_repeated_block_functions(onnx_path, expected)
 
+
 @pytest.mark.llm_model
 @pytest.mark.parametrize(
     ("arch", "model_id"),
@@ -1975,7 +1978,6 @@ def test_layerwise_supported_guard_accepts_all_supported(arch, model_id):
         _skip_on_model_fetch_error(exc, model_id)
     resolved = _layerwise.assert_layerwise_supported(config)
     assert arch in resolved or resolved.startswith(arch)
-
 
 
 @pytest.mark.llm_model

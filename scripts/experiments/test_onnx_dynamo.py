@@ -110,7 +110,7 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     config = AutoConfig.from_pretrained(args.model_name)
-    # config.num_hidden_layers = 4
+    config.num_hidden_layers = args.num_hidden_layers
     config.torch_dtype = torch.float32
     # print(config)
 
@@ -126,6 +126,7 @@ def main() -> None:
     # PyTorch (KV) output
     hf_model = AutoModelForCausalLM.from_pretrained(args.model_name, config=config)
     hf_tokens = runner.run_hf_model_on_pytorch(hf_model)
+
     print(hf_tokens)
 
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, config=config)
@@ -171,8 +172,12 @@ def main() -> None:
     print("compile done")
 
     print("QEff Transformed Onnx Model Outputs(AIC Backend)")
-    output = qeff_model.generate(prompts=[args.prompt], tokenizer=tokenizer, automation=True,       # 👈 This dumps .raw files + for_qaic.json
-    write_io=True     )
+    output = qeff_model.generate(
+        prompts=[args.prompt],
+        tokenizer=tokenizer,
+        automation=True,  # 👈 This dumps .raw files + for_qaic.json
+        write_io=True,
+    )
     print(output)
     print(output.generated_ids)
 

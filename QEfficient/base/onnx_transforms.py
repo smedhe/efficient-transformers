@@ -264,7 +264,7 @@ class RenameFunctionOutputsTransform(BaseOnnxTransform):
                             for token in ("past_key.", "past_value.", "compressed_kv.", "k_pe."):
                                 if not base.startswith(token):
                                     continue
-                                tail = base[len(token):]
+                                tail = base[len(token) :]
                                 _, _, infix = tail.partition("_")
                                 infix = f"_{infix}" if infix else ""
                                 new = f"{token}{layer_idx}{infix}_RetainedState"
@@ -275,6 +275,7 @@ class RenameFunctionOutputsTransform(BaseOnnxTransform):
                             graph.output[model_out_map[orig]].name = new
                 layer_idx += 1
         return renamed
+
 
 class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
     """Expose nested decoder cache side effects as explicit ONNX values."""

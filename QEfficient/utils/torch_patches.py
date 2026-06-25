@@ -83,7 +83,6 @@ _SAFE_EXPORT_PASS_REPLACEMENTS = {
 }
 
 
-
 def _setup_trace_module_map_patched(
     model,
     export_modules_as_functions,
@@ -197,7 +196,6 @@ def _track_scope_attributes_patched(graph, attrs):
     return _original_track_scope_attrs(graph, safe_attrs)
 
 
-
 def _layerwise_safe_export_passes_enabled():
     try:
         from QEfficient.base.modeling_qeff import QEFFBaseModel
@@ -255,7 +253,6 @@ def layerwise_safe_onnx_export_patches(enabled: bool = True, keep_passes=None):
         _disable_safe_export_pass_patches()
 
 
-
 def apply_torch_patches():
     """Apply monkey patches for ONNX export (TorchScript path)."""
     global _PATCHES_ACTIVE
@@ -297,7 +294,6 @@ def undo_torch_patches():
         _C._jit_pass_onnx_track_scope_attributes = _original_track_scope_attrs
 
     _PATCHES_ACTIVE = False
-
 
 
 @contextmanager
