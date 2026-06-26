@@ -4275,7 +4275,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 offload_pt_weights=kwargs.get("offload_pt_weights", True),
                 prefill_only=prefill_only,
             )
-        
 
     def build_prefill_specialization(
         self,
