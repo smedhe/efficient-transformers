@@ -20,7 +20,7 @@ from QEfficient.blocking.attention_blocking import (
     generic_blocked_attention_interface,
     generic_blocked_mla_attention_interface,
 )
-from QEfficient.customop.rms_norm import CustomRMSNormFunc
+from QEfficient.customop.rms_norm_opset17 import CustomRMSNormFunc
 from QEfficient.customop.utils import select_interface
 from QEfficient.transformers.cache_utils import QEffDynamicCache, QEffDynamicCompressedKVRopeCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask

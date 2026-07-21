@@ -16,7 +16,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.models.llama.modeling_llama import repeat_kv
 
-from QEfficient.customop.rms_norm import CustomRMSNormFunc
+from QEfficient.customop.rms_norm_opset17 import CustomRMSNormFunc
 from QEfficient.customop.utils import select_interface
 from QEfficient.transformers.cache_utils import QEffDynamicCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask

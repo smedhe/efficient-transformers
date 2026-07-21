@@ -12,7 +12,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.blocking.attention_blocking import BlockingMode
-from QEfficient.customop.ctx_scatter_gather import CtxGatherFunc3D, CtxGatherFunc3DGeneralized
+from QEfficient.customop.ctx_scatter_gather_opset17 import CtxGatherFunc3D, CtxGatherFunc3DGeneralized
 from QEfficient.transformers.models.glm4_moe.modeling_glm4_moe import QEffGlm4MoeAttention
 
 MODEL_KWARGS = {"attn_implementation": "eager"}

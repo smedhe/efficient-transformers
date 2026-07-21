@@ -32,7 +32,8 @@ from transformers.models.gemma4.modeling_gemma4 import (
 )
 
 from QEfficient.base.onnx_transforms import FP16ClipTransform
-from QEfficient.customop.rms_norm import CustomRMSNormFunc
+from QEfficient.customop.rms_norm_opset17 import CustomRMSNormFunc
+from QEfficient.customop.utils import select_interface
 from QEfficient.transformers.cache_utils import QEffGemma4DynamicCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils import constants
@@ -275,7 +276,7 @@ class QEffGemma4CustomRMSNormAIC(nn.Module):
             weight = getattr(self, "_qeff_unit_weight", None)
             if weight is None:
                 weight = hidden_states.new_ones(hidden_states.shape[-1])
-        return CustomRMSNormFunc.apply(hidden_states, weight, self.eps)
+        return select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)(hidden_states, weight, self.eps)
 
 
 class QEffGemma4TextExperts(Gemma4TextExperts):

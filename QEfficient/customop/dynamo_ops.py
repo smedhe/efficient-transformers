@@ -353,7 +353,14 @@ def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> 
 # Translation table: torch.ops.qefficient.* → ONNX export classes.
 # Used by _export_via_dynamo via custom_translation_table.
 # ---------------------------------------------------------------------------
-from QEfficient.customop.ctx_scatter_gather import (  # noqa: E402
+from QEfficient.customop.ctx_scatter_gather_cb_opset18 import (  # noqa: E402
+    CtxGatherBlockedKVCB,
+    CtxGatherCB,
+    CtxGatherCB3D,
+    CtxScatterCB,
+    CtxScatterCB3D,
+)
+from QEfficient.customop.ctx_scatter_gather_opset18 import (  # noqa: E402
     CtxGather,
     CtxGather3D,
     CtxGatherBlockedKV,
@@ -361,14 +368,7 @@ from QEfficient.customop.ctx_scatter_gather import (  # noqa: E402
     CtxScatter3D,
     CtxScatter3DInt,
 )
-from QEfficient.customop.ctx_scatter_gather_cb import (  # noqa: E402
-    CtxGatherBlockedKVCB,
-    CtxGatherCB,
-    CtxGatherCB3D,
-    CtxScatterCB,
-    CtxScatterCB3D,
-)
-from QEfficient.customop.rms_norm import CustomRMSNorm  # noqa: E402
+from QEfficient.customop.rms_norm_opset18 import CustomRMSNorm  # noqa: E402
 
 DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.rms_norm.default: CustomRMSNorm,

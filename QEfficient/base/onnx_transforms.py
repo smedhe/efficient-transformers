@@ -16,7 +16,19 @@ import onnx
 import torch
 from onnx import ModelProto, TensorProto, external_data_helper, numpy_helper
 
-from QEfficient.customop.ctx_scatter_gather import (
+from QEfficient.customop.ctx_scatter_gather_cb_opset17 import (
+    CtxGatherBlockedKVCB,
+    CtxGatherCB,
+    CtxGatherCB3D,
+    CtxGatherFuncBlockedKVCB,
+    CtxGatherFuncCB,
+    CtxGatherFuncCB3D,
+    CtxScatterCB,
+    CtxScatterCB3D,
+    CtxScatterFuncCB,
+    CtxScatterFuncCB3D,
+)
+from QEfficient.customop.ctx_scatter_gather_opset17 import (
     CtxGather,
     CtxGather3D,
     CtxGatherBlockedKV,
@@ -32,21 +44,9 @@ from QEfficient.customop.ctx_scatter_gather import (
     CtxScatterFunc3DGeneralized,
     CtxScatterFunc3DInt,
 )
-from QEfficient.customop.ctx_scatter_gather_cb import (
-    CtxGatherBlockedKVCB,
-    CtxGatherCB,
-    CtxGatherCB3D,
-    CtxGatherFuncBlockedKVCB,
-    CtxGatherFuncCB,
-    CtxGatherFuncCB3D,
-    CtxScatterCB,
-    CtxScatterCB3D,
-    CtxScatterFuncCB,
-    CtxScatterFuncCB3D,
-)
 
 # from QEfficient.customop.quantization_ops import CastToUInt4, CastToUInt4Func
-from QEfficient.customop.rms_norm import CustomRMSNorm, CustomRMSNormFunc
+from QEfficient.customop.rms_norm_opset17 import CustomRMSNorm, CustomRMSNormFunc
 from QEfficient.utils.constants import FILE_CHUNK_SIZE_DEFAULT, ONNX_EXPORT_OPSET, SIZE_THRESHOLD_DEFAULT
 
 logger = logging.getLogger(__name__)

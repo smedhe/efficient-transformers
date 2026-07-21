@@ -39,12 +39,13 @@ from QEfficient.blocking.attention_blocking import (
     generic_blocked_attention_interface,
 )
 from QEfficient.customop import (
-    CtxGatherFuncCB,
-    CtxGatherFuncCB3D,
-    CtxScatterFuncCB,
-    CtxScatterFuncCB3D,
+    ctx_gather_cb,
+    ctx_gather_cb_3d,
+    ctx_scatter_cb,
+    ctx_scatter_cb_3d,
 )
-from QEfficient.customop.rms_norm import CustomRMSNormFunc
+from QEfficient.customop.rms_norm_opset17 import CustomRMSNormFunc
+from QEfficient.customop.utils import select_interface
 from QEfficient.transformers.cache_utils import (
     QEffDynamicLayer,
 )
@@ -64,7 +65,7 @@ class QEffQwen3_5GatedDeltaNetCustomRMSNormAIC(nn.Module):
 
     def forward(self, hidden_states, gate):
         return (
-            CustomRMSNormFunc.apply(
+            select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)(
                 hidden_states, self.weight, self.variance_epsilon if hasattr(self, "variance_epsilon") else self.eps
             )
         ) * F.silu(gate.to(torch.float32))
@@ -767,13 +768,13 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 conv_ctx_indices = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-                conv_state = CtxGatherFuncCB3D.apply(conv_state_all, conv_batch_index, conv_ctx_indices)
+                conv_state = ctx_gather_cb_3d(conv_state_all, conv_batch_index, conv_ctx_indices)
 
                 recurrent_batch_index = batch_index.to(recurrent_state_all.device)
                 recurrent_ctx_indices = torch.arange(
                     recurrent_state_all.shape[2], dtype=torch.int64, device=recurrent_state_all.device
                 )[None, None, :]
-                recurrent_state = CtxGatherFuncCB.apply(
+                recurrent_state = ctx_gather_cb(
                     recurrent_state_all, recurrent_batch_index, recurrent_ctx_indices, recurrent_state_all.shape[2]
                 )
             else:
@@ -792,7 +793,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 conv_position_ids = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-                cache_params.conv_states[self.layer_idx] = CtxScatterFuncCB3D.apply(
+                cache_params.conv_states[self.layer_idx] = ctx_scatter_cb_3d(
                     conv_state_all, conv_batch_index, conv_position_ids, new_conv_state
                 )
             else:
@@ -852,7 +853,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 recurrent_position_ids = torch.arange(
                     recurrent_state_all.shape[2], dtype=torch.int64, device=recurrent_state_all.device
                 )[None, :].expand(recurrent_batch_index.shape[0], -1)
-                cache_params.recurrent_states[self.layer_idx] = CtxScatterFuncCB.apply(
+                cache_params.recurrent_states[self.layer_idx] = ctx_scatter_cb(
                     recurrent_state_all,
                     recurrent_batch_index,
                     recurrent_position_ids,

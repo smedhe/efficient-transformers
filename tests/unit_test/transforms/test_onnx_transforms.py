@@ -588,7 +588,7 @@ class TestCustomOpTransformStructure:
     def test_custom_op_transform_rms_norm_maps_to_custom_rms_norm(self):
         """CustomRMSNormFunc must map to CustomRMSNorm class."""
         from QEfficient.base.onnx_transforms import CustomOpTransform
-        from QEfficient.customop.rms_norm import CustomRMSNorm
+        from QEfficient.customop.rms_norm_opset17 import CustomRMSNorm
 
         _, onnxscript_func = CustomOpTransform._custom_ops["CustomRMSNormFunc"]
         assert onnxscript_func is CustomRMSNorm, f"CustomRMSNormFunc must map to CustomRMSNorm, got {onnxscript_func}"
