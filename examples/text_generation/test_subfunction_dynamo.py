@@ -12,10 +12,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils.run_utils import ApiRunner
 
-model_name = "hf-internal-testing/tiny-random-MistralForCausalLM"
+model_name = "zai-org/GLM-4.7"
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-config.num_hidden_layers = 4
+config.num_hidden_layers = 5
 config.torch_dtype = torch.float16
 # print(config)
 runner = ApiRunner(

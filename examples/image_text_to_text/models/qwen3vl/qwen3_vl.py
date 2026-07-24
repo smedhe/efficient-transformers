@@ -26,7 +26,7 @@ qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
 tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
 processor = AutoProcessor.from_pretrained(model_id)
 ### use skip_vision=Ture, if want to run only text, else false ###
-skip_vision = True
+skip_vision = False
 
 if skip_vision:
     ## Only Text ##

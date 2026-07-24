@@ -70,17 +70,22 @@ def qeff_apply_interleaved_mrope(freqs, mrope_section):
     returns:
         x_t: (bs, seq_len, head_dim // 2)
     """
-    freqs_t = freqs[0]  # just overwrite the first dimension T
+    # Flatten (bs, seq_len) -> (bs*seq_len,) so slice assignments operate on 2D
+    # tensors. torch.export decomposes strided slice writes to select_scatter, and
+    # the QAIC compiler only supports select_scatter on 2D inputs.
+    leading = freqs.shape[1:]  # (bs, seq_len, half_dim)
+    freqs_2d = freqs.reshape(3, -1, freqs.shape[-1])  # (3, bs*seq_len, half_dim)
+    freqs_t = freqs_2d[0].clone()
     half_shape = freqs.shape[-1] // 2
     for dim, offset in enumerate((1, 2), start=1):  # H, W
         length = mrope_section[dim] * 3
         idx = slice(offset, length, 3)
-        freqs_t[..., idx] = freqs[dim, ..., idx]
+        freqs_t[:, idx] = freqs_2d[dim, :, idx]
         offset += half_shape
         length += half_shape
         idx = slice(offset, length, 3)
-        freqs_t[..., idx] = freqs[dim, ..., idx]
-    return freqs_t
+        freqs_t[:, idx] = freqs_2d[dim, :, idx]
+    return freqs_t.reshape(leading)
 
 
 def qeff_prepare_mrope_cos_sin(cos, sin, position_ids, mrope_section):
