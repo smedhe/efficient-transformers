@@ -1142,29 +1142,25 @@ class QEffSlidingWindowCache:
 
 
 class QEffHybridCacheForGPTOSS:
-    def __init__(self, config, batch_size, max_cache_len, sliding_window_len):
-        self.max_cache_len = max_cache_len
-        self.batch_size = batch_size
-        self.sliding_window_len = sliding_window_len
+    def __init__(self, config):
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
 
+    @property
+    def max_cache_len(self):
+        return self.key_cache[1].shape[2]   # ctx_len, stays symbolic
+
+    @property
+    def sliding_window_len(self):
+        return self.key_cache[0].shape[2]   # sliding_window, stays symbolic
+        
     @classmethod
     def from_legacy_cache(
         cls, config, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     ) -> "HybridCache":
         """Converts a cache in the legacy cache format into an equivalent `DynamicCache`. Used for
         backward compatibility."""
-        cache = cls(
-            config,
-            batch_size=past_key_values[0][0].shape[0],
-            max_cache_len=int(past_key_values[1][0].shape[2])
-            if torch._dynamo.is_compiling()
-            else past_key_values[1][0].shape[2],
-            sliding_window_len=int(past_key_values[0][0].shape[2])
-            if torch._dynamo.is_compiling()
-            else past_key_values[0][0].shape[2],
-        )
+        cache = cls(config)
         if past_key_values is not None:
             for layer_idx in range(len(past_key_values)):
                 key_states, value_states = past_key_values[layer_idx]
