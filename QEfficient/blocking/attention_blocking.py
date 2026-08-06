@@ -119,7 +119,7 @@ def generic_blocked_attention_interface(
     **kwargs,
 ):
     use_kv_blocked = (
-        blocking_config is not None and "kv" in blocking_config.mode and supports_blocked_kv(past_key_value)
+        blocking_config is not None and "kv" in blocking_config.mode.value and supports_blocked_kv(past_key_value)
     )
 
     if past_key_value is not None:

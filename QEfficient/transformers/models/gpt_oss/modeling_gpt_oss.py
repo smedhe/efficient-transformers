@@ -631,16 +631,16 @@ class QEffGptOssRotaryEmbedding(GptOssRotaryEmbedding):
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
 
 
-# def rotate_half(x):
-#     """Rotates half the hidden dims of the input."""
-#     x1 = x[..., : x.shape[-1] // 2]
-#     x2 = x[..., x.shape[-1] // 2 :]
-#     return torch.cat((-x2, x1), dim=-1)
-
-
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    x1, x2 = torch.chunk(x, 2, dim=-1)
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
+
+
+# def rotate_half(x: torch.Tensor) -> torch.Tensor:
+#     x1, x2 = torch.chunk(x, 2, dim=-1)
+#     return torch.cat((-x2, x1), dim=-1)
 
 
 def qeff_apply_rotary_pos_emb(q, k, cos, sin):
