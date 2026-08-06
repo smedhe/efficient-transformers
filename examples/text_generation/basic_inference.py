@@ -44,7 +44,6 @@ def main():
 
     # Compile the model
     qpc_path = model.compile(
-        onnx_path="/home/smedhe/llama_singlefile_v6/llama_export-9b6728ed2187ac03/LlamaForCausalLM.onnx",
         batch_size=8,
         prefill_seq_len=1024,
         ctx_len=2048,

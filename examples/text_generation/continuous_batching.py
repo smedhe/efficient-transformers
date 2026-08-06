@@ -60,7 +60,7 @@ def main():
         num_devices=8,
         dynamo=args.dynamo,
         use_onnx_subfunctions=True,
-        mxfp6_matmul=True,
+        mxfp6_matmul=False,
     )
     print(f"Model compiled to: {qpc_path}")
 
