@@ -3848,6 +3848,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         layerwise_window_size: int = 1,
         kv_cache_prefix: Optional[str] = None,
         dynamo: bool = False,
+        use_weight_free_export: bool = False,
         **kwargs,
     ) -> str:
         """

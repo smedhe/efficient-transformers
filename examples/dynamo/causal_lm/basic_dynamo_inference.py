@@ -13,10 +13,26 @@ Requires PyTorch >= 2.13. Install dependencies before running:
 
 import argparse
 
-from transformers import AutoConfig, AutoTokenizer
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.utils import constants
+
+
+def load_qeff_model(model_name: str, num_hidden_layers: int, use_weight_free_export: bool, enable_proxy: bool):
+    config = AutoConfig.from_pretrained(model_name)
+    if num_hidden_layers > 0:
+        config.num_hidden_layers = num_hidden_layers
+
+    if not use_weight_free_export:
+        return QEFFAutoModelForCausalLM.from_pretrained(model_name, config=config, enable_proxy=enable_proxy)
+
+    config.dtype = torch.float16
+    config.torch_dtype = torch.float16
+    with torch.device("meta"):
+        hf_model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
+    return QEFFAutoModelForCausalLM(hf_model, pretrained_model_name_or_path=model_name, enable_proxy=enable_proxy)
 
 
 def main():
@@ -70,8 +86,9 @@ def main():
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,
         aic_hw_version=args.aic_hw_version,
-        num_devices=(1 if args.device_group is None else len(args.device_group)),
+        num_devices=(2 if args.device_group is None else len(args.device_group)),
         dynamo=True,
+        use_weight_free_export=args.use_weight_free_export,
         use_onnx_subfunctions=True,
     )
     print(f"Model compiled to: {qpc_path}")

@@ -380,6 +380,7 @@ class QEFFBaseModel(ABC):
         num_cores: Optional[int] = constants.DEFAULT_AIC_NUM_CORES,
         qaic_config: Optional[dict] = None,
         prefill_seq_len: Optional[int] = None,
+        use_weight_free_export: bool = False,
         **export_kwargs,
     ) -> str:
         """
@@ -601,6 +602,7 @@ class QEFFBaseModel(ABC):
         retain_full_kv: Optional[bool] = False,
         qaic_config: Optional[dict] = None,
         kv_cache_prefix: Optional[str] = None,
+        use_weight_free_export: bool = False,
         **compiler_options,
     ):
         kwargs = {
@@ -608,6 +610,7 @@ class QEFFBaseModel(ABC):
             "use_onnx_subfunctions": use_onnx_subfunctions,
             "dynamo": dynamo,
             "retain_full_kv": retain_full_kv,
+            "use_weight_free_export": use_weight_free_export,
         }
         layerwise_cache_probe = compiler_options.pop("_layerwise_cache_probe", False)
         if layerwise_cache_probe:
@@ -967,6 +970,7 @@ class QEFFBaseModel(ABC):
         qaic_config: Optional[dict] = None,
         specialization_module_name: Optional[str] = None,
         kv_cache_prefix: Optional[str] = None,
+        use_weight_free_export: bool = False,
         **compiler_options,
     ) -> str:
         """
@@ -1029,6 +1033,7 @@ class QEFFBaseModel(ABC):
                     qaic_config=qaic_config,
                     _layerwise_cache_probe=layerwise_cache_probe,
                     kv_cache_prefix=kv_cache_prefix,
+                    use_weight_free_export=use_weight_free_export,
                     **compiler_options,
                 )
         if QEFFBaseModel._layerwise_active:
