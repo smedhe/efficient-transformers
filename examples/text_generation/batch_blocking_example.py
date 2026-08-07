@@ -52,7 +52,7 @@ def main():
             ctx_len=args.ctx_len,
             num_cores=args.num_cores,
             num_devices=8,
-            dynamo=True,
+            dynamo=False,
             use_onnx_subfunctions=True,
         )
         print(f"Model compiled to: {qpc_path}")
@@ -76,7 +76,10 @@ def main():
         "num_q_blocks": 2,
         "head_block_size": 8,
     }
-    model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name)
+    model_blocked = QEFFAutoModelForCausalLM.from_pretrained(
+        args.model_name,
+        enable_proxy=True,
+    )
 
     # Compile the model
     qpc_path_blocked = model_blocked.compile(
@@ -85,7 +88,7 @@ def main():
         num_cores=args.num_cores,
         num_devices=8,
         qaic_config=qaic_config,
-        dynamo=True,
+        dynamo=False,
         use_onnx_subfunctions=True,
     )
     print(f"Model compiled to: {qpc_path_blocked}")
@@ -95,6 +98,7 @@ def main():
         tokenizer=tokenizer,
         prompts=[args.prompt],
         generation_len=args.generation_len,
+        write_io=True,
     )
 
     print(f"\nPrompt: {args.prompt}")
