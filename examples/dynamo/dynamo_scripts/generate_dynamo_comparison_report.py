@@ -338,18 +338,32 @@ def build_index(models: List[Tuple[str, str]], aggregate: Dict[str, Dict[str, Di
         f"<div class='card'><a href='{html_escape(filename)}'>{html_escape(model_name)}</a></div>"
         for model_name, filename in models
     )
+    # Only include modes that have at least one row across all models — avoids an
+    # all-"missing" matrix when a run only covers a subset of MODES (e.g. ccl/cb_ccl only).
+    modes_with_data = [
+        mode
+        for mode in MODES
+        if any(
+            aggregate.get(model_name, {}).get(dtype, {}).get(mode)
+            for model_name in aggregate
+            for dtype in ("fp16", "fp32")
+        )
+    ]
+    mode_labels = {"basic": "Basic", "cb": "CB", "ccl": "CCL", "cb_ccl": "CB+CCL"}
+
     rows = []
     for model_name, filename in models:
-        basic_bucket = get_preferred_bucket(model_name, "basic")
-        cb_bucket = get_preferred_bucket(model_name, "cb")
-        basic_without_status, basic_without_html = render_mode_cell(basic_bucket, with_dynamo=False)
-        basic_with_status, basic_with_html = render_mode_cell(basic_bucket, with_dynamo=True)
-        cb_without_status, cb_without_html = render_mode_cell(cb_bucket, with_dynamo=False)
-        cb_with_status, cb_with_html = render_mode_cell(cb_bucket, with_dynamo=True)
+        mode_buckets = {mode: get_preferred_bucket(model_name, mode) for mode in modes_with_data}
+        cell_statuses = []
+        cells_html = []
+        for mode in modes_with_data:
+            bucket = mode_buckets[mode]
+            without_status, without_html = render_mode_cell(bucket, with_dynamo=False)
+            with_status, with_html = render_mode_cell(bucket, with_dynamo=True)
+            cell_statuses.extend([without_status, with_status])
+            cells_html.extend([without_html, with_html])
         arch, family = get_model_meta(model_name)
-        overall_text, overall_class = overall_status(
-            [basic_without_status, basic_with_status, cb_without_status, cb_with_status]
-        )
+        overall_text, overall_class = overall_status(cell_statuses)
 
         rows.append(
             "<tr>"
@@ -357,13 +371,15 @@ def build_index(models: List[Tuple[str, str]], aggregate: Dict[str, Dict[str, Di
             f"<td>{html_escape(arch)}</td>"
             f"<td>{html_escape(family)}</td>"
             f"<td><span class='badge {overall_class}'>{html_escape(overall_text)}</span></td>"
-            f"<td>{basic_without_html}</td>"
-            f"<td>{basic_with_html}</td>"
-            f"<td>{cb_without_html}</td>"
-            f"<td>{cb_with_html}</td>"
-            "</tr>"
+            + "".join(f"<td>{cell_html}</td>" for cell_html in cells_html)
+            + "</tr>"
         )
     matrix_rows = "".join(rows)
+    matrix_headers = "".join(
+        f"<th>{html_escape(mode_labels.get(mode, mode))} without Dynamo</th>"
+        f"<th>{html_escape(mode_labels.get(mode, mode))} with Dynamo</th>"
+        for mode in modes_with_data
+    )
     return (
         "<!doctype html><html><head><meta charset='utf-8'/>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
@@ -399,10 +415,7 @@ def build_index(models: List[Tuple[str, str]], aggregate: Dict[str, Dict[str, Di
         "<th>Architecture</th>"
         "<th>Family</th>"
         "<th>Overall</th>"
-        "<th>Basic without Dynamo</th>"
-        "<th>Basic with Dynamo</th>"
-        "<th>CB without Dynamo</th>"
-        "<th>CB with Dynamo</th>"
+        f"{matrix_headers}"
         "</tr>"
         f"{matrix_rows}"
         "</table>"

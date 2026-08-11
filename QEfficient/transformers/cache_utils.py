@@ -1313,14 +1313,7 @@ class QEffHybridCacheForGPTOSS:
             else:
                 ctx_len = cache_kwargs.get("CCL", self.key_cache[layer_idx].shape[2])
 
-            # ctx_indices = torch.arange(ctx_len, dtype=position_ids.dtype)[None, None, ...]
-
-            self.ctx_indices_base = torch.arange(
-                self.max_cache_len,
-                dtype=torch.int64,
-            )
-
-            ctx_indices = self.ctx_indices_base[:ctx_len].to(position_ids.dtype).view(1, 1, -1)
+            ctx_indices = torch.arange(ctx_len, dtype=position_ids.dtype)[None, None, ...]
 
             gather_limit = position_ids.max(1, keepdim=True).values.unsqueeze(1).to(position_ids.dtype)
             invalid_mask = ctx_indices > gather_limit

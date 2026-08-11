@@ -50,11 +50,9 @@ jobs:
             'onnxscript==0.6.2' \
             onnx_ir
 
-      - name: Run dynamo CPU tests
+      - name: Run dynamo unit tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HUGGINGFACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          pytest tests/dynamo/ \
-            -m "not on_qaic" \
-            -n auto -v
+          pytest tests/dynamo/unit_tests/ -n auto -v

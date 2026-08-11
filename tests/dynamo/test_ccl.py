@@ -6,30 +6,35 @@
 # -----------------------------------------------------------------------------
 
 """
-Dynamo + Compute-Context-Length (CCL) export/compile tests.
+Dynamo + Compute-Context-Length (CCL) compile/generate tests.
 
-All tests run with dynamo=True and use_onnx_subfunctions=True, plus
-qaic_config={"ccl_enabled": True} (basic CCL) and continuous_batching=True
-combined with CCL (cb_ccl).
+Requires QAIC hardware (marked @pytest.mark.on_qaic) -- qaic-compile is not
+installed on GitHub-hosted CI runners, only on the Jenkins QAIC node, so these
+tests only ever run there (see tests/dynamo/unit_tests/ for the CPU-only
+export/ORT-parity tests that do run on GitHub CI).
 
-CPU-only tests validate ONNX export structure. on_qaic tests additionally
-compile with comp_ctx_lengths_prefill/decode specializations and generate.
+CCL (comp_ctx_lengths_prefill/decode) is a compile-time-only concept: the only
+export-time effect of qaic_config={"ccl_enabled": True} is adding the
+comp_ctx_lengths input/dynamic-axis to the graph (see QEFFAutoModelForCausalLM.export).
+So each model is exported once per mode (basic vs continuous_batching) with
+dynamo=True + use_onnx_subfunctions=True + ccl_enabled=True, via the shared
+get_dynamo_export() cache in _helpers.py (also used by test_on_qaic.py), and
+compiled twice from that one export: once with auto-generated CCL lists
+(normal compile) and once with explicit comp_ctx_lengths_prefill/decode
+(CCL compile). generate() always reuses the QPC path set by the compile that
+just ran -- no recompiling for generate.
 """
 
 from __future__ import annotations
 
 import pytest
-
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+import torch
 
 from ._helpers import (
     BATCH_SIZE,
     DYNAMO_CAUSAL_LM_MODEL_IDS,
     FULL_BATCH_SIZE,
-    assert_has_subfunctions,
-    assert_retained_state_outputs,
-    exported_onnx_path,
-    load_hf_model,
+    get_dynamo_export,
     load_tokenizer,
     skip_on_model_fetch_error,
 )
@@ -39,64 +44,22 @@ from ._helpers import (
 # CTX_LEN=16 used elsewhere in tests/dynamo/, both prefill and decode collapse to
 # the same value and the collision-repair step (walking down by CCL_UNIQNE_STEP=32)
 # lands on 0, which the compiler rejects. Use ctx_len/prefill_seq_len large enough
-# to avoid that collision (matches the values validated in manual CCL automation runs).
+# to avoid that collision (matches values validated in manual CCL automation runs).
 CCL_PREFILL_SEQ_LEN = 32
 CCL_CTX_LEN = 128
 CCL_LENGTHS = [1024, 2048]
 
 
-@pytest.mark.dynamo
-@pytest.mark.dynamo_export
-@pytest.mark.parametrize(
-    "model_type,model_id", sorted(DYNAMO_CAUSAL_LM_MODEL_IDS.items()), ids=sorted(DYNAMO_CAUSAL_LM_MODEL_IDS)
-)
-def test_dynamo_ccl_export(model_type, model_id, tmp_export_dir):
-    """qaic_config={'ccl_enabled': True} + dynamo=True and use_onnx_subfunctions=True."""
-    try:
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
-
-    qeff_model = QEFFAutoModelForCausalLM(model_hf, qaic_config={"ccl_enabled": True})
-    onnx_path = exported_onnx_path(
-        qeff_model.export(
-            tmp_export_dir,
-            dynamo=True,
-            use_onnx_subfunctions=True,
-            offload_pt_weights=False,
-        )
+def _generate(qeff_model, tokenizer, prompts):
+    """Reuses the QPC the preceding compile() call just produced (qeff_model.qpc_path) -- no recompile."""
+    output = qeff_model.generate(
+        tokenizer=tokenizer,
+        prompts=prompts,
+        device_id=[0],
     )
-
-    num_layers = model_hf.config.num_hidden_layers
-    assert_retained_state_outputs(onnx_path, expected_count=2 * num_layers)
-    assert_has_subfunctions(onnx_path, qeff_model)
-
-
-@pytest.mark.dynamo
-@pytest.mark.dynamo_export
-@pytest.mark.parametrize(
-    "model_type,model_id", sorted(DYNAMO_CAUSAL_LM_MODEL_IDS.items()), ids=sorted(DYNAMO_CAUSAL_LM_MODEL_IDS)
-)
-def test_dynamo_cb_ccl_export(model_type, model_id, tmp_export_dir):
-    """continuous_batching=True + qaic_config={'ccl_enabled': True} + dynamo=True and use_onnx_subfunctions=True."""
-    try:
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
-
-    qeff_model = QEFFAutoModelForCausalLM(model_hf, continuous_batching=True, qaic_config={"ccl_enabled": True})
-    onnx_path = exported_onnx_path(
-        qeff_model.export(
-            tmp_export_dir,
-            dynamo=True,
-            use_onnx_subfunctions=True,
-            offload_pt_weights=False,
-        )
-    )
-
-    num_layers = model_hf.config.num_hidden_layers
-    assert_retained_state_outputs(onnx_path, expected_count=2 * num_layers)
-    assert_has_subfunctions(onnx_path, qeff_model)
+    assert output is not None
+    assert output.generated_texts is not None
+    return output
 
 
 @pytest.mark.dynamo
@@ -106,24 +69,31 @@ def test_dynamo_cb_ccl_export(model_type, model_id, tmp_export_dir):
 @pytest.mark.parametrize(
     "model_type,model_id", list(DYNAMO_CAUSAL_LM_MODEL_IDS.items()), ids=list(DYNAMO_CAUSAL_LM_MODEL_IDS)
 )
-def test_dynamo_ccl_generate(model_type, model_id, tmp_export_dir):
-    """Export -> compile with comp_ctx_lengths -> generate, dynamo=True + use_onnx_subfunctions=True + ccl_enabled=True."""
+def test_dynamo_ccl_compile_and_generate(model_type, model_id, tmp_export_dir, tmp_path_factory):
+    """Compile the shared ccl_enabled export normally, compile with CCL, generate on each QPC."""
     try:
-        model_hf = load_hf_model(model_id)
-        tokenizer = load_tokenizer(model_id)
+        onnx_path, qeff_model = get_dynamo_export(
+            model_id, tmp_path_factory, torch_dtype=torch.float16, ccl_enabled=True
+        )
+        tokenizer = load_tokenizer(model_id, torch_dtype=torch.float16)
     except Exception as exc:
         skip_on_model_fetch_error(exc, model_id)
 
-    qeff_model = QEFFAutoModelForCausalLM(model_hf, qaic_config={"ccl_enabled": True})
-    onnx_path = exported_onnx_path(
-        qeff_model.export(
-            tmp_export_dir / "ccl_export",
-            dynamo=True,
-            use_onnx_subfunctions=True,
-        )
-    )
+    # --- Compile normally (auto-generated CCL lists; no explicit comp_ctx_lengths) ---
     qeff_model.compile(
-        onnx_path=str(onnx_path),
+        onnx_path=onnx_path,
+        compile_dir=str(tmp_export_dir / "normal_compile"),
+        prefill_seq_len=CCL_PREFILL_SEQ_LEN,
+        ctx_len=CCL_CTX_LEN,
+        num_cores=16,
+        batch_size=BATCH_SIZE,
+        use_onnx_subfunctions=True,
+    )
+    _generate(qeff_model, tokenizer, ["hello world"])
+
+    # --- Compile with explicit CCL specializations, from the same export ---
+    qeff_model.compile(
+        onnx_path=onnx_path,
         compile_dir=str(tmp_export_dir / "ccl_compile"),
         prefill_seq_len=CCL_PREFILL_SEQ_LEN,
         ctx_len=CCL_CTX_LEN,
@@ -133,13 +103,7 @@ def test_dynamo_ccl_generate(model_type, model_id, tmp_export_dir):
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
-    output = qeff_model.generate(
-        tokenizer=tokenizer,
-        prompts=["hello world"],
-        device_id=[0],
-    )
-    assert output is not None
-    assert output.generated_texts is not None
+    _generate(qeff_model, tokenizer, ["hello world"])
 
 
 @pytest.mark.dynamo
@@ -149,28 +113,39 @@ def test_dynamo_ccl_generate(model_type, model_id, tmp_export_dir):
 @pytest.mark.parametrize(
     "model_type,model_id", list(DYNAMO_CAUSAL_LM_MODEL_IDS.items()), ids=list(DYNAMO_CAUSAL_LM_MODEL_IDS)
 )
-def test_dynamo_cb_ccl_generate(model_type, model_id, tmp_export_dir):
-    """Continuous-batching + CCL: export -> compile -> generate, dynamo=True + use_onnx_subfunctions=True."""
+def test_dynamo_cb_ccl_compile_and_generate(model_type, model_id, tmp_export_dir, tmp_path_factory):
+    """Continuous-batching + CCL: compile the shared CB+ccl_enabled export normally, compile with CCL,
+    generate on each QPC."""
     # TODO: fix gpt_oss CB scatter op shape mismatch with dynamo subfunctions (see test_dynamo_cb_generate).
     if model_type == "gpt_oss":
         pytest.skip("gpt_oss CB scatter op has shape mismatch with dynamo subfunctions — pending fix")
 
     try:
-        model_hf = load_hf_model(model_id)
-        tokenizer = load_tokenizer(model_id)
+        onnx_path, qeff_model = get_dynamo_export(
+            model_id, tmp_path_factory, torch_dtype=torch.float16, continuous_batching=True, ccl_enabled=True
+        )
+        tokenizer = load_tokenizer(model_id, torch_dtype=torch.float16)
     except Exception as exc:
         skip_on_model_fetch_error(exc, model_id)
 
-    qeff_model = QEFFAutoModelForCausalLM(model_hf, continuous_batching=True, qaic_config={"ccl_enabled": True})
-    onnx_path = exported_onnx_path(
-        qeff_model.export(
-            tmp_export_dir / "cb_ccl_export",
-            dynamo=True,
-            use_onnx_subfunctions=True,
-        )
-    )
+    prompts = ["hello world"] * FULL_BATCH_SIZE
+
+    # --- Compile normally (auto-generated CCL lists; no explicit comp_ctx_lengths) ---
     qeff_model.compile(
-        onnx_path=str(onnx_path),
+        onnx_path=onnx_path,
+        compile_dir=str(tmp_export_dir / "cb_normal_compile"),
+        prefill_seq_len=CCL_PREFILL_SEQ_LEN,
+        ctx_len=CCL_CTX_LEN,
+        num_cores=16,
+        batch_size=BATCH_SIZE,
+        full_batch_size=FULL_BATCH_SIZE,
+        use_onnx_subfunctions=True,
+    )
+    _generate(qeff_model, tokenizer, prompts)
+
+    # --- Compile with explicit CCL specializations, from the same export ---
+    qeff_model.compile(
+        onnx_path=onnx_path,
         compile_dir=str(tmp_export_dir / "cb_ccl_compile"),
         prefill_seq_len=CCL_PREFILL_SEQ_LEN,
         ctx_len=CCL_CTX_LEN,
@@ -181,12 +156,4 @@ def test_dynamo_cb_ccl_generate(model_type, model_id, tmp_export_dir):
         full_batch_size=FULL_BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
-    prompts = ["hello world"] * FULL_BATCH_SIZE
-    output = qeff_model.generate(
-        tokenizer=tokenizer,
-        prompts=prompts,
-        device_id=[0],
-    )
-    assert output is not None
-    assert output.generated_texts is not None
-    assert len(output.generated_texts) == FULL_BATCH_SIZE
+    _generate(qeff_model, tokenizer, prompts)

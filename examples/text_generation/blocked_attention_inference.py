@@ -70,12 +70,13 @@ def main():
 
     # setup qaic config to enable blocking, ensure 4 or more device ids are passed
     # qaic_config = {"enable_blocking": True, "blocking_mode": args.blocking_mode}
-    qaic_config = {
-        "enable_blocking": True,
-        "blocking_mode": "kv",
-        "num_kv_blocks": 16,
-        "skip_kv": True,
-    }
+    # qaic_config = {
+    #     "enable_blocking": True,
+    #     "blocking_mode": "kv",
+    #     "num_kv_blocks": 16,
+    #     "skip_kv": True,
+    # }
+    qaic_config = {"enable_blocking": True, "blocking_mode": "bhqkv", "num_batch_blocks": 4}
     model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2)
 
     # Compile the model
@@ -83,7 +84,7 @@ def main():
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,
-        num_devices=4,
+        num_devices=2,
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
