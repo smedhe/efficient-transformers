@@ -19,10 +19,11 @@ CPU-only. No QAIC hardware required.
 from __future__ import annotations
 
 import pytest
+import torch
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
-from ._helpers import (
+from .._helpers import (
     BATCH_SIZE,
     CTX_LEN,
     DYNAMO_CAUSAL_LM_MODEL_IDS,
@@ -47,8 +48,8 @@ def test_dynamo_export_and_ort_parity(model_type, model_id, tmp_export_dir):
     ONNX structure and HF PT == ORT token parity in a single export pass."""
 
     try:
-        model_hf = load_hf_model(model_id)
-        tokenizer = load_tokenizer(model_id)
+        model_hf = load_hf_model(model_id, torch_dtype=torch.float32)
+        tokenizer = load_tokenizer(model_id, torch_dtype=torch.float32)
     except Exception as exc:
         skip_on_model_fetch_error(exc, model_id)
 

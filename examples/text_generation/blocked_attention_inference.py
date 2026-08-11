@@ -77,7 +77,7 @@ def main():
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,
-        num_devices=4,
+        num_devices=2,
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,

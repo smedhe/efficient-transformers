@@ -15,6 +15,7 @@ reducing memory footprint and computation for shorter sequences.
 
 import argparse
 
+import torch
 from transformers import AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
@@ -116,6 +117,7 @@ def main():
         qaic_config={
             "ccl_enabled": args.ccl_enabled,
         },
+        torch_dtype=torch.float16,
     )
 
     # Compile the model
@@ -127,6 +129,8 @@ def main():
         "num_devices": args.num_devices,
         "mxint8_kv_cache": args.mxint8_kv_cache,
         "mxfp6_matmul": args.mxfp6_matmul,
+        "use_onnx_subfunctions": True,
+        "dynamo": True,
     }
 
     if args.continuous_batching:

@@ -26,11 +26,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
 # ---------------------------------------------------------------------------
-# Worker-level model cache — from_pretrained runs once per model per worker.
-# Tests receive a deepcopy so weight offload or transforms in one test
-# do not affect other tests that share the same cached instance.
+# Worker-level model cache — from_pretrained runs once per (model_id, dtype)
+# per worker. Tests receive a deepcopy so weight offload or transforms in one
+# test do not affect other tests that share the same cached instance.
 # ---------------------------------------------------------------------------
-_HF_MODEL_CACHE: Dict[str, Tuple[AutoModelForCausalLM, AutoTokenizer]] = {}
+_HF_MODEL_CACHE: Dict[Tuple[str, torch.dtype], Tuple[AutoModelForCausalLM, AutoTokenizer]] = {}
 
 # ---------------------------------------------------------------------------
 # Model registry
@@ -76,7 +76,7 @@ PROMPT_LEN = 8
 CTX_LEN = 16
 BATCH_SIZE = 1
 FULL_BATCH_SIZE = 4
-MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False, "torch_dtype": torch.float32}
+MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False}
 
 # ---------------------------------------------------------------------------
 # Load helpers
@@ -89,26 +89,29 @@ def skip_on_model_fetch_error(exc: Exception, model_id: str) -> None:
     )
 
 
-def load_hf_model(model_id: str) -> AutoModelForCausalLM:
-    if model_id not in _HF_MODEL_CACHE:
+def load_hf_model(model_id: str, torch_dtype: torch.dtype) -> AutoModelForCausalLM:
+    key = (model_id, torch_dtype)
+    if key not in _HF_MODEL_CACHE:
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             trust_remote_code=True,
+            torch_dtype=torch_dtype,
             **MODEL_KWARGS,
         )
         model.eval()
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         if not hasattr(tokenizer, "pad_token") or tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        _HF_MODEL_CACHE[model_id] = (model, tokenizer)
-    model, _ = _HF_MODEL_CACHE[model_id]
+        _HF_MODEL_CACHE[key] = (model, tokenizer)
+    model, _ = _HF_MODEL_CACHE[key]
     return copy.deepcopy(model)
 
 
-def load_tokenizer(model_id: str) -> AutoTokenizer:
-    if model_id not in _HF_MODEL_CACHE:
-        load_hf_model(model_id)
-    _, tokenizer = _HF_MODEL_CACHE[model_id]
+def load_tokenizer(model_id: str, torch_dtype: torch.dtype) -> AutoTokenizer:
+    key = (model_id, torch_dtype)
+    if key not in _HF_MODEL_CACHE:
+        load_hf_model(model_id, torch_dtype=torch_dtype)
+    _, tokenizer = _HF_MODEL_CACHE[key]
     return tokenizer
 
 
@@ -118,6 +121,66 @@ def exported_onnx_path(export_result) -> Path:
     onnx_path = Path(export_result)
     assert onnx_path.is_file(), f"Expected ONNX file at {onnx_path}"
     return onnx_path
+
+
+# ---------------------------------------------------------------------------
+# Dynamo ONNX export cache — shared across all tests/dynamo/ test modules.
+#
+# dynamo=True + use_onnx_subfunctions=True export is expensive (torch.export
+# graph capture + subfunction extraction), and multiple test modules
+# (test_on_qaic.py, test_ccl.py) each need the same basic/continuous_batching
+# export per model to then compile it under different flags (single vs
+# multi-device, with vs without CCL specializations). Key on
+# (model_id, torch_dtype, continuous_batching, ccl_enabled) -- the only
+# export-time knobs that change the resulting graph/weights. Compile-time-only
+# flags (mxfp6_matmul, num_devices, comp_ctx_lengths_prefill/decode, ...) must
+# NOT be part of this key since they don't affect the exported ONNX. Note the
+# QAIC compiler itself never emits an fp32 QPC -- CUSTOM_IO_DTYPE_MAP maps
+# torch.float32 to "float16" same as torch.float16 (see modeling_auto.py), so
+# convert_to_fp16 is derived from the PyTorch model's dtype, not requested at
+# compile(); torch_dtype here changes the exported ONNX *weights*, not what
+# the compiler outputs.
+# ---------------------------------------------------------------------------
+_DYNAMO_ONNX_CACHE: Dict[Tuple[str, torch.dtype, bool, bool], Tuple[str, "QEFFAutoModelForCausalLM"]] = {}
+
+
+def get_dynamo_export(
+    model_id: str,
+    tmp_path_factory,
+    *,
+    torch_dtype: torch.dtype,
+    continuous_batching: bool = False,
+    ccl_enabled: bool = False,
+) -> Tuple[str, QEFFAutoModelForCausalLM]:
+    """Export once per (model_id, torch_dtype, continuous_batching, ccl_enabled) combination
+    and cache the (onnx_path, qeff_model) pair for reuse by every test that needs that exact export.
+
+    Callers still perform their own compile()/generate() against the returned qeff_model --
+    only the (expensive) export step is shared.
+    """
+    key = (model_id, torch_dtype, continuous_batching, ccl_enabled)
+    if key in _DYNAMO_ONNX_CACHE:
+        return _DYNAMO_ONNX_CACHE[key]
+
+    model_hf = load_hf_model(model_id, torch_dtype=torch_dtype)
+    kwargs: Dict[str, object] = {}
+    if continuous_batching:
+        kwargs["continuous_batching"] = True
+    if ccl_enabled:
+        kwargs["qaic_config"] = {"ccl_enabled": True}
+
+    qeff_model = QEFFAutoModelForCausalLM(model_hf, **kwargs)
+
+    export_dir = tmp_path_factory.mktemp("dynamo_export", numbered=True)
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            export_dir,
+            dynamo=True,
+            use_onnx_subfunctions=True,
+        )
+    )
+    _DYNAMO_ONNX_CACHE[key] = (str(onnx_path), qeff_model)
+    return _DYNAMO_ONNX_CACHE[key]
 
 
 # ---------------------------------------------------------------------------

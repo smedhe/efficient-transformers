@@ -14,8 +14,8 @@ from transformers import AutoConfig, AutoTokenizer
 from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 
-# model_id = "Qwen/Qwen3-30B-A3B-Instruct-2507"  # weights are not required to convert to fp32
-model_id = "yujiepan/qwen3-moe-tiny-random"
+model_id = "Qwen/Qwen3-30B-A3B-Instruct-2507"  # weights are not required to convert to fp32
+# model_id = "yujiepan/qwen3-moe-tiny-random"
 prompt = """
 Explain quantum computing in simple terms.
 """
@@ -39,6 +39,8 @@ decode_qpc_path = qeff_model.compile(
     num_speculative_tokens=None,
     offload_pt_weights=False,  # Need the weights in memory for prefill-model export/compilation in the next step
     retain_full_kv=True,
+    use_onnx_subfunctions=True,
+    dynamo=True,
 )
 
 # Following command errors out by default, the user is supposed to run the printed command and provide the generated qpc path as prefill_qpc_path commenting out lines 55-68
@@ -61,6 +63,7 @@ prefill_qpc_path = qeff_model.compile(
     prefill_only=True,
     enable_chunking=True,
     use_onnx_subfunctions=True,
+    dynamo=True,
 )
 
 

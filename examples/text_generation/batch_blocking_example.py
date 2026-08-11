@@ -21,6 +21,9 @@ def main():
         "--ctx-len", type=int, default=32768, help="Context length high enough to force blocking computation"
     )
     parser.add_argument("--generation-len", type=int, default=100, help="Number of tokens to generate")
+    parser.add_argument(
+        "--batch-size", type=int, default=4, help="Batch size; should be >= num_batch_blocks to exercise batch blocking"
+    )
     parser.add_argument("--num-cores", type=int, default=16, help="Number of cores")
     parser.add_argument(
         "--device-group",
@@ -41,6 +44,8 @@ def main():
     )
     args = parser.parse_args()
 
+    prompts = [args.prompt] * args.batch_size
+
     # Load tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2)
@@ -50,6 +55,7 @@ def main():
         qpc_path = model.compile(
             prefill_seq_len=args.prefill_seq_len,
             ctx_len=args.ctx_len,
+            batch_size=args.batch_size,
             num_cores=args.num_cores,
             num_devices=8,
             dynamo=False,
@@ -60,12 +66,13 @@ def main():
         # Generate text
         exec_info = model.generate(
             tokenizer=tokenizer,
-            prompts=[args.prompt],
+            prompts=prompts,
             generation_len=args.generation_len,
         )
 
-        print(f"\nPrompt: {args.prompt}")
-        print(f"Generated: {exec_info.generated_texts[0]}")
+        for prompt, text in zip(prompts, exec_info.generated_texts):
+            print(f"\nPrompt: {prompt}")
+            print(f"Generated: {text}")
 
     # setup qaic config to enable blocking, ensure 4 or more device ids are passed
     qaic_config = {
@@ -77,13 +84,13 @@ def main():
     }
     model_blocked = QEFFAutoModelForCausalLM.from_pretrained(
         args.model_name,
-        enable_proxy=True,
     )
 
     # Compile the model
     qpc_path_blocked = model_blocked.compile(
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=args.ctx_len,
+        batch_size=args.batch_size,
         num_cores=args.num_cores,
         num_devices=8,
         qaic_config=qaic_config,
@@ -95,13 +102,14 @@ def main():
     # Generate text
     exec_info_blocked = model_blocked.generate(
         tokenizer=tokenizer,
-        prompts=[args.prompt],
+        prompts=prompts,
         generation_len=args.generation_len,
         write_io=True,
     )
 
-    print(f"\nPrompt: {args.prompt}")
-    print(f"Generated: {exec_info_blocked.generated_texts[0]}")
+    for prompt, text in zip(prompts, exec_info_blocked.generated_texts):
+        print(f"\nPrompt: {prompt}")
+        print(f"Generated: {text}")
 
     if args.compare_non_blocking:
         print("Performance non-blocked:")
