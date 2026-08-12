@@ -207,10 +207,11 @@ class InputHandler:
             axis=1,
         ).astype(np.int64)
 
+        ort_dtype = torch.zeros(1, dtype=self.dtype).numpy().dtype
         for i in range(self.n_layer):
             pad_shape = self._get_layer_cache_shape(i)
-            inputs["past_key." + str(i)] = np.zeros((pad_shape), dtype=np.float32)
-            inputs["past_value." + str(i)] = np.zeros((pad_shape), dtype=np.float32)
+            inputs["past_key." + str(i)] = np.zeros((pad_shape), dtype=ort_dtype)
+            inputs["past_value." + str(i)] = np.zeros((pad_shape), dtype=ort_dtype)
         if self.full_batch_size:
             inputs["batch_index"] = np.arange(self.full_batch_size).reshape(-1, 1)
         return inputs
