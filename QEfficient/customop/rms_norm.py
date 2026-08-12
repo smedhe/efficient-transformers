@@ -18,10 +18,10 @@ ops = getattr(onnxscript, "opset" + str(constants.ONNX_LEGACY_EXPORT_OPSET))
 
 @qeff_custom_op("com.qti.aisw.onnx", 1)
 def CustomRMSNorm(hidden_states: onnxscript.FLOAT, weight: onnxscript.FLOAT, epsilon: float) -> onnxscript.FLOAT:
-    weight = ops.Cast(weight, to=1)
     variance = ops.ReduceMean(ops.Pow(hidden_states, 2), axes=[-1], keepdims=1)
-    epsilon = ops.Expand(epsilon, ops.Shape(variance))
+    epsilon = ops.CastLike(ops.Expand(epsilon, ops.Shape(variance)), variance)
     hidden_states = hidden_states * ops.Reciprocal(ops.Sqrt(variance + epsilon))
+    weight = ops.CastLike(weight, hidden_states)
     return weight * hidden_states
 
 
