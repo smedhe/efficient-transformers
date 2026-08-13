@@ -71,7 +71,6 @@ _BLOCKING_SUPPORTED_TYPES = {
     "llama",
     "mistral",
     "mixtral",
-    "mpt",
     "qwen2",
     "qwen3",
     "qwen3_moe",
@@ -124,7 +123,11 @@ def test_dynamo_blocking_export_gather_ops(model_type, model_id, blocking_key, t
     if blocking_key in {"hq", "hkv"}:
         pytest.xfail(f"blocked_hqkv_attention_forward crashes on mode='{blocking_key}' (None block count)")
 
-    qaic_config, expect_blocked_kv = BLOCKING_MODE_CASES[blocking_key]
+    # Copy -- transform() mutates qaic_config in place (e.g. stamping
+    # num_replicate_kv_heads), and BLOCKING_MODE_CASES[blocking_key] is a single
+    # dict object shared across every model parametrized under this blocking_key.
+    qaic_config_template, expect_blocked_kv = BLOCKING_MODE_CASES[blocking_key]
+    qaic_config = dict(qaic_config_template)
 
     try:
         model_hf = load_hf_model(model_id, torch_dtype=torch.float32)

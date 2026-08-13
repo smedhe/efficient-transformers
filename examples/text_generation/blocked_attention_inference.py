@@ -82,7 +82,7 @@ def main():
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
         qaic_config=qaic_config,
-        user_tiled=True,
+        user_tiled=False,
         dynamo=True,
     )
     print(f"Model compiled to: {qpc_path_blocked}")
