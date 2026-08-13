@@ -68,6 +68,7 @@ def update_running_softmax(
     prev_output = output
     # if updating running softmax with attention sinks, we don't have v_block
     if v_block is not None:
+        # import ipdb ; ipdb.set_trace()
         output_updated = ((prev_denominator / current_denominator_updated).unsqueeze(-1)) * prev_output * torch.exp(
             delta_max.unsqueeze(-1)
         ) + torch.matmul(prob, v_block)
@@ -124,8 +125,9 @@ def blocked_kv_attention_forward(
         (batch_size, num_heads, seq_len),
         float(MIN_MASKED_ATTENTION_VALUE),
         device=query.device,
+        dtype=query.dtype,
     )
-    current_denominator = torch.zeros(batch_size, num_heads, seq_len, device=query.device)
+    current_denominator = torch.zeros(batch_size, num_heads, seq_len, device=query.device, dtype=query.dtype)
 
     past_seen_tokens = cache_kwargs.get("past_seen_tokens")
     if torch.onnx.is_in_onnx_export():
@@ -273,8 +275,9 @@ def blocked_qkv_attention_forward(
             (batch_size, num_heads, q_len_block),
             float(MIN_MASKED_ATTENTION_VALUE),
             device=query.device,
+            dtype=query.dtype,
         )
-        current_denominator = torch.zeros(batch_size, num_heads, q_len_block, device=query.device)
+        current_denominator = torch.zeros(batch_size, num_heads, q_len_block, device=query.device, dtype=query.dtype)
         output_blocks = torch.zeros((batch_size, num_heads, q_len_block, DH), device=query.device, dtype=query.dtype)
 
         for j in range(num_kv_blocks):
@@ -430,8 +433,11 @@ def blocked_hqkv_attention_forward(
                 (batch_size, h_end - h_start, q_len_block),
                 float(MIN_MASKED_ATTENTION_VALUE),
                 device=query.device,
+                dtype=query.dtype,
             )
-            current_denominator = torch.zeros(batch_size, h_end - h_start, q_len_block, device=query.device)
+            current_denominator = torch.zeros(
+                batch_size, h_end - h_start, q_len_block, device=query.device, dtype=query.dtype
+            )
             output_blocks = torch.zeros(
                 (batch_size, h_end - h_start, q_len_block, DH), device=query.device, dtype=query.dtype
             )
@@ -613,8 +619,11 @@ def blocked_bhqkv_attention_forward(
                     (batch_len, h_end - h_start, q_len_block),
                     float(MIN_MASKED_ATTENTION_VALUE),
                     device=query.device,
+                    dtype=query.dtype,
                 )
-                current_denominator = torch.zeros(batch_len, h_end - h_start, q_len_block, device=query.device)
+                current_denominator = torch.zeros(
+                    batch_len, h_end - h_start, q_len_block, device=query.device, dtype=query.dtype
+                )
                 output_blocks = torch.zeros(
                     (batch_len, h_end - h_start, q_len_block, DH), device=query.device, dtype=query.dtype
                 )

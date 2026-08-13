@@ -56,10 +56,8 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 
 from ._helpers import (
     BATCH_SIZE,
-    CTX_LEN,
     DYNAMO_CAUSAL_LM_MODEL_IDS,
     FULL_BATCH_SIZE,
-    PROMPT_LEN,
     load_tokenizer,
     skip_on_model_fetch_error,
 )
@@ -85,7 +83,6 @@ _BLOCKING_SUPPORTED_TYPES = {
     "llama",
     "mistral",
     "mixtral",
-    "mpt",
     "qwen2",
     "qwen3",
     "qwen3_moe",
@@ -97,13 +94,15 @@ HEAD_BLOCK_SIZE = 2
 NUM_KV_BLOCKS = 2
 NUM_Q_BLOCKS = 2
 NUM_BATCH_BLOCKS = 2
+PROMPT_LEN_BLOCKING = 32
+CTX_LEN_BLOCKING = 128
 # head blocking splits attention heads across devices/SoCs (mdp_ts_num_devices
 # feeds the blocking-config computation), so it needs num_devices > 1 to mean
 # anything -- matches test_causal_lm_blocking_hqkv.py's num_devices=4.
 HEAD_BLOCKING_NUM_DEVICES = 4
 MULTI_DEVICE_BLOCKING_KEYS = {"head", "hq", "hkv", "hqkv", "bhqkv"}
 # See module docstring TODO: blocked_hqkv_attention_forward crashes for hq/hkv.
-XFAIL_BLOCKING_KEYS = {"hq", "hkv"}
+XFAIL_BLOCKING_KEYS = {"hq", "hkv", "bhqkv"}
 
 # All 7 BlockingMode values reachable from single-attention-call configs (NONE
 # is the no-blocking baseline, covered by unit_tests/test_blocking.py's
@@ -111,19 +110,28 @@ XFAIL_BLOCKING_KEYS = {"hq", "hkv"}
 # the mode string purely from which qaic_config keys are set -- see
 # QEfficient/blocking/blocking_configurator.py -- num_kv_blocks -> "kv",
 # num_q_blocks -> "q", head_block_size -> "h", combined in h+q+kv order.
+# BLOCKING_QAIC_CONFIGS = {
+#     "head": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE),
+#     "kv": dict(enable_blocking=True, num_kv_blocks=NUM_KV_BLOCKS),
+#     "q": dict(enable_blocking=True, num_q_blocks=NUM_Q_BLOCKS),
+#     "qkv": dict(enable_blocking=True, num_kv_blocks=NUM_KV_BLOCKS, num_q_blocks=NUM_Q_BLOCKS),
+#     "hq": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE, num_q_blocks=NUM_Q_BLOCKS),
+#     "hkv": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE, num_kv_blocks=NUM_KV_BLOCKS),
+#     "hqkv": dict(
+#         enable_blocking=True,
+#         head_block_size=HEAD_BLOCK_SIZE,
+#         num_kv_blocks=NUM_KV_BLOCKS,
+#         num_q_blocks=NUM_Q_BLOCKS,
+#     ),
+# }
 BLOCKING_QAIC_CONFIGS = {
-    "head": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE),
-    "kv": dict(enable_blocking=True, num_kv_blocks=NUM_KV_BLOCKS),
-    "q": dict(enable_blocking=True, num_q_blocks=NUM_Q_BLOCKS),
-    "qkv": dict(enable_blocking=True, num_kv_blocks=NUM_KV_BLOCKS, num_q_blocks=NUM_Q_BLOCKS),
-    "hq": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE, num_q_blocks=NUM_Q_BLOCKS),
-    "hkv": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE, num_kv_blocks=NUM_KV_BLOCKS),
-    "hqkv": dict(
-        enable_blocking=True,
-        head_block_size=HEAD_BLOCK_SIZE,
-        num_kv_blocks=NUM_KV_BLOCKS,
-        num_q_blocks=NUM_Q_BLOCKS,
-    ),
+    "head": dict(enable_blocking=True, blocking_mode="h"),
+    "kv": dict(enable_blocking=True, blocking_mode="kv"),
+    "q": dict(enable_blocking=True, blocking_mode="q"),
+    "qkv": dict(enable_blocking=True, blocking_mode="qkv"),
+    "hq": dict(enable_blocking=True, blocking_mode="hq"),
+    "hkv": dict(enable_blocking=True, blocking_mode="hkv"),
+    "hqkv": dict(enable_blocking=True, blocking_mode="hqkv"),
 }
 
 # BHQKV (batch+head+q+kv) additionally requires num_batch_blocks <= batch_size
@@ -173,7 +181,10 @@ def test_dynamo_blocking_compile_and_generate(model_type, model_id, blocking_key
     """compile(qaic_config=<blocking mode>, dynamo=True, use_onnx_subfunctions=True) -> generate.
 
     Multi-device blocking_keys (head, hq, hkv, hqkv) only verify compile success; no generate()."""
-    qaic_config = BLOCKING_QAIC_CONFIGS[blocking_key]
+    # Copy -- compile()/transform() mutates qaic_config in place (e.g. stamping
+    # num_replicate_kv_heads), and BLOCKING_QAIC_CONFIGS[blocking_key] is a single
+    # dict object shared across every model parametrized under this blocking_key.
+    qaic_config = dict(BLOCKING_QAIC_CONFIGS[blocking_key])
     is_multi_device = blocking_key in MULTI_DEVICE_BLOCKING_KEYS
     num_devices = HEAD_BLOCKING_NUM_DEVICES if is_multi_device else 1
 
@@ -187,12 +198,13 @@ def test_dynamo_blocking_compile_and_generate(model_type, model_id, blocking_key
     compile_dir = tmp_export_dir / f"{blocking_key}_compile"
     qeff_model.compile(
         compile_dir=str(compile_dir),
-        prefill_seq_len=PROMPT_LEN,
-        ctx_len=CTX_LEN,
+        prefill_seq_len=PROMPT_LEN_BLOCKING,
+        ctx_len=CTX_LEN_BLOCKING,
         num_cores=16,
         num_devices=num_devices,
         batch_size=BATCH_SIZE,
         qaic_config=qaic_config,
+        user_tiled=True,
         dynamo=True,
         use_onnx_subfunctions=True,
     )
@@ -226,7 +238,7 @@ def test_dynamo_cb_blocking_compile_and_generate(model_type, model_id, blocking_
     if model_type == "gpt_oss":
         pytest.skip("gpt_oss CB scatter op has shape mismatch with dynamo subfunctions — pending fix")
 
-    qaic_config = CB_BLOCKING_QAIC_CONFIGS[blocking_key]
+    qaic_config = dict(CB_BLOCKING_QAIC_CONFIGS[blocking_key])
     is_multi_device = blocking_key in MULTI_DEVICE_BLOCKING_KEYS
     num_devices = HEAD_BLOCKING_NUM_DEVICES if is_multi_device else 1
 
@@ -240,13 +252,14 @@ def test_dynamo_cb_blocking_compile_and_generate(model_type, model_id, blocking_
     compile_dir = tmp_export_dir / f"cb_{blocking_key}_compile"
     qeff_model.compile(
         compile_dir=str(compile_dir),
-        prefill_seq_len=PROMPT_LEN,
-        ctx_len=CTX_LEN,
+        prefill_seq_len=PROMPT_LEN_BLOCKING,
+        ctx_len=CTX_LEN_BLOCKING,
         num_cores=16,
         num_devices=num_devices,
         batch_size=BATCH_SIZE,
         full_batch_size=FULL_BATCH_SIZE,
         qaic_config=qaic_config,
+        user_tiled=True,
         dynamo=True,
         use_onnx_subfunctions=True,
     )

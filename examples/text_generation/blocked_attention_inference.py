@@ -76,7 +76,8 @@ def main():
     #     "num_kv_blocks": 16,
     #     "skip_kv": True,
     # }
-    qaic_config = {"enable_blocking": True, "blocking_mode": "bhqkv", "num_batch_blocks": 4}
+    qaic_config = {"enable_blocking": True, "blocking_mode": "h", "head_block_size": 2}
+    # qaic_config = {"enable_blocking": True, "blocking_mode": "qkv"}
     model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2)
 
     # Compile the model
@@ -89,7 +90,7 @@ def main():
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
         qaic_config=qaic_config,
-        user_tiled=True,
+        user_tiled=False,
         dynamo=True,
     )
     print(f"Model compiled to: {qpc_path_blocked}")
