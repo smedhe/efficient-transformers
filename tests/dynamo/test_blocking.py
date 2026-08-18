@@ -113,7 +113,7 @@ XFAIL_BLOCKING_KEYS = {"hq", "hkv", "bhqkv"}
 # BLOCKING_QAIC_CONFIGS = {
 #     "head": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE),
 #     "kv": dict(enable_blocking=True, num_kv_blocks=NUM_KV_BLOCKS),
-#     "q": dict(enable_blocking=True, num_q_blocks=NUM_Q_BLOCKS),
+#     "q": dict(enable_blocking=True, num_kv_blocks=NUM_KV_BLOCKS),
 #     "qkv": dict(enable_blocking=True, num_kv_blocks=NUM_KV_BLOCKS, num_q_blocks=NUM_Q_BLOCKS),
 #     "hq": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE, num_q_blocks=NUM_Q_BLOCKS),
 #     "hkv": dict(enable_blocking=True, head_block_size=HEAD_BLOCK_SIZE, num_kv_blocks=NUM_KV_BLOCKS),
@@ -125,13 +125,21 @@ XFAIL_BLOCKING_KEYS = {"hq", "hkv", "bhqkv"}
 #     ),
 # }
 BLOCKING_QAIC_CONFIGS = {
-    "head": dict(enable_blocking=True, blocking_mode="h"),
-    "kv": dict(enable_blocking=True, blocking_mode="kv"),
-    "q": dict(enable_blocking=True, blocking_mode="q"),
-    "qkv": dict(enable_blocking=True, blocking_mode="qkv"),
-    "hq": dict(enable_blocking=True, blocking_mode="hq"),
-    "hkv": dict(enable_blocking=True, blocking_mode="hkv"),
-    "hqkv": dict(enable_blocking=True, blocking_mode="hqkv"),
+    "head": dict(enable_blocking=True, blocking_mode="h", head_block_size=HEAD_BLOCK_SIZE),
+    "kv": dict(enable_blocking=True, blocking_mode="kv", num_kv_blocks=NUM_KV_BLOCKS),
+    "q": dict(enable_blocking=True, blocking_mode="q", num_kv_blocks=NUM_KV_BLOCKS),
+    "qkv": dict(enable_blocking=True, blocking_mode="qkv", num_kv_blocks=NUM_KV_BLOCKS, num_q_blocks=NUM_Q_BLOCKS),
+    "hq": dict(enable_blocking=True, blocking_mode="hq", head_block_size=HEAD_BLOCK_SIZE, num_q_blocks=NUM_Q_BLOCKS),
+    "hkv": dict(
+        enable_blocking=True, blocking_mode="hkv", head_block_size=HEAD_BLOCK_SIZE, num_kv_blocks=NUM_KV_BLOCKS
+    ),
+    "hqkv": dict(
+        enable_blocking=True,
+        blocking_mode="hqkv",
+        head_block_size=HEAD_BLOCK_SIZE,
+        num_kv_blocks=NUM_KV_BLOCKS,
+        num_q_blocks=NUM_Q_BLOCKS,
+    ),
 }
 
 # BHQKV (batch+head+q+kv) additionally requires num_batch_blocks <= batch_size
