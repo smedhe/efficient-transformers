@@ -16,7 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description="Basic text generation inference")
     parser.add_argument("--model-name", type=str, default="meta-llama/Llama-3.2-1B", help="HuggingFace model ID")
     parser.add_argument("--prompt", type=str, default="Hello", help="Input prompt")
-    parser.add_argument("--prefill-seq-len", type=int, default=1, help="Prefill sequence length")
+    parser.add_argument("--prefill-seq-len", type=int, default=32, help="Prefill sequence length")
     parser.add_argument(
         "--ctx-len", type=int, default=128, help="Context length high enough to force blocking computation"
     )
@@ -76,8 +76,8 @@ def main():
     #     "num_kv_blocks": 16,
     #     "skip_kv": True,
     # }
-    qaic_config = {"enable_blocking": True, "blocking_mode": "h", "head_block_size": 2}
-    # qaic_config = {"enable_blocking": True, "blocking_mode": "qkv"}
+    # qaic_config = {"enable_blocking": True, "blocking_mode": "qkv",}
+    qaic_config = {"enable_blocking": True, "blocking_mode": "kv"}
     model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2)
 
     # Compile the model
@@ -85,12 +85,12 @@ def main():
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,
-        num_devices=2,
+        num_devices=4,
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
         qaic_config=qaic_config,
-        user_tiled=False,
+        user_tiled=True,
         dynamo=True,
     )
     print(f"Model compiled to: {qpc_path_blocked}")
