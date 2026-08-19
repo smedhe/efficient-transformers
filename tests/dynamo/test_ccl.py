@@ -56,8 +56,8 @@ def _generate(qeff_model, tokenizer, prompts):
 )
 def test_dynamo_ccl_compile_and_generate(model_type, model_id, tmp_export_dir):
     """Compile the shared ccl_enabled export normally, compile with CCL, generate on each QPC."""
-    if model_type == "gpt_oss":
-        pytest.skip("gpt_oss CB scatter op has shape mismatch with dynamo subfunctions — pending fix")
+    # if model_type == "gpt_oss":
+    #     pytest.skip("gpt_oss CB scatter op has shape mismatch with dynamo subfunctions — pending fix")
 
     try:
         model_hf = load_hf_model(model_id)
@@ -104,8 +104,8 @@ def test_dynamo_cb_ccl_compile_and_generate(model_type, model_id, tmp_export_dir
     """Continuous-batching + CCL: compile the shared CB+ccl_enabled export normally, compile with CCL,
     generate on each QPC."""
     # TODO: fix gpt_oss CB scatter op shape mismatch with dynamo subfunctions (see test_dynamo_cb_generate).
-    if model_type == "gpt_oss":
-        pytest.skip("gpt_oss CB scatter op has shape mismatch with dynamo subfunctions — pending fix")
+    # if model_type == "gpt_oss":
+    #     pytest.skip("gpt_oss CB scatter op has shape mismatch with dynamo subfunctions — pending fix")
 
     try:
         model_hf = load_hf_model(model_id)

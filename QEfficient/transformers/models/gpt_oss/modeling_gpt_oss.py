@@ -898,8 +898,8 @@ class QEffPrefillOnlyGptOssAttention(GptOssAttention):
                 v_cache = value_states[:, :, read_idx, :]
             else:
                 k_cache, v_cache = key_states, value_states
-            # Keep the scatter result data-dependent for Dynamo export; otherwise CtxScatter can be inlined.
-            key_states, value_states = past_key_values.write_only(k_cache, v_cache, self.layer_idx, cache_kwargs)
+
+            _, _ = past_key_values.write_only(k_cache, v_cache, self.layer_idx, cache_kwargs)
 
         if self.sliding_window is not None:
             attention_mask = sliding_mask
