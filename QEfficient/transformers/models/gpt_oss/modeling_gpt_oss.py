@@ -1116,7 +1116,7 @@ class QEffPrefillOnlyGptOssModel(GptOssModel):
         causal_mask = _create_causal_mask(position_ids=position_ids, target_length=past_key_values.max_cache_len)
         sliding_mask = _create_causal_mask(
             position_ids=position_ids,
-            target_length=past_key_values.sliding_window_len,
+            target_length=past_key_values.max_cache_len,
             sliding_window=past_key_values.sliding_window_len,
         )
 
