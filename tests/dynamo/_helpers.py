@@ -5,12 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-"""
-Shared helpers, model registry, and constants for tests/dynamo/.
-
-Model IDs follow the same plain-dict pattern as CAUSAL_RUNTIME_MODEL_IDS
-in tests/unit_test/models/test_model_quickcheck.py.
-"""
+"""Shared helpers, model registry, and constants for tests/dynamo/."""
 
 from __future__ import annotations
 
@@ -18,28 +13,23 @@ import copy
 from pathlib import Path
 from typing import Dict, Tuple
 
+import numpy as np
 import onnx
 import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+from QEfficient.utils.run_utils import ApiRunner
 
-# ---------------------------------------------------------------------------
-# Worker-level model cache — from_pretrained runs once per (model_id, dtype)
-# per worker. Tests receive a deepcopy so weight offload or transforms in one
-# test do not affect other tests that share the same cached instance.
-# ---------------------------------------------------------------------------
+# Worker-level caches. Model callers receive deep copies because transforms and
+# weight offload can mutate model instances.
 _HF_MODEL_CACHE: Dict[Tuple[str, torch.dtype], Tuple[AutoModelForCausalLM, AutoTokenizer]] = {}
-
-# ---------------------------------------------------------------------------
-# Model registry
-# ---------------------------------------------------------------------------
+_HF_TOKEN_CACHE: Dict[Tuple[str, str, str, Tuple[str, ...], int, int, int, int | None], object] = {}
 
 DYNAMO_CAUSAL_LM_MODEL_IDS = {
     "codegen": "hf-internal-testing/tiny-random-CodeGenForCausalLM",
-    # deepseek_v3: transformers version in this env is missing is_torch_fx_available;
-    # excluded until the env is updated to a compatible transformers release.
+    # deepseek_v3 needs a newer compatible transformers environment.
     "falcon": "hf-internal-testing/tiny-random-FalconForCausalLM",
     "gemma": "Xenova/tiny-random-GemmaForCausalLM",
     "gemma2": "hf-internal-testing/tiny-random-Gemma2ForCausalLM",
@@ -48,44 +38,36 @@ DYNAMO_CAUSAL_LM_MODEL_IDS = {
     "gpt_bigcode": "hf-internal-testing/tiny-random-GPTBigCodeForCausalLM",
     "gpt_oss": "tiny-random/gpt-oss-bf16",
     "gptj": "hf-internal-testing/tiny-random-GPTJForCausalLM",
-    "granite": "hf-internal-testing/tiny-random-GraniteForCausalLM",
-    "granitemoe": "hf-internal-testing/tiny-random-GraniteMoeForCausalLM",
-    # grok_1: tiny random model config is malformed for QEff (AttributeError on keys());
-    # excluded until a valid tiny checkpoint is available.
+    "granite": "hf-tiny-v2/tiny-random-GraniteForCausalLM",
+    "granitemoe": "hf-tiny-v2/tiny-random-GraniteMoeForCausalLM",
+    # grok_1 tiny config is not supported in legacy.
     "llama": "hf-internal-testing/tiny-random-LlamaForCausalLM",
-    # llama_swiftkv requires QEffLlamaSwiftKVConfig + QEffLlamaSwiftKVForCausalLM,
-    # not AutoModelForCausalLM. No tiny random model exists on HF Hub.
-    # Tested via check_causal_models.py with the full Snowflake model.
+    # llama_swiftkv is not AutoModelForCausalLM-compatible.
     "mistral": "hf-internal-testing/tiny-random-MistralForCausalLM",
     "mixtral": "hf-internal-testing/tiny-random-MixtralForCausalLM",
     "mpt": "hf-internal-testing/tiny-random-MptForCausalLM",
     "olmo2": "hf-internal-testing/tiny-random-Olmo2ForCausalLM",
     "phi": "hf-internal-testing/tiny-random-PhiForCausalLM",
-    # "phi3": "tiny-random/phi-4", #TODO: need to fix the SplitToSequence issue
+    # phi3 is disabled until SplitToSequence is fixed.
     "qwen2": "yujiepan/qwen2-tiny-random",
     "qwen3": "tiny-random/qwen3",
     "qwen3_moe": "tiny-random/qwen3-moe",
     "starcoder2": "hf-internal-testing/tiny-random-Starcoder2ForCausalLM",
 }
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-PROMPT_LEN = 8
-CTX_LEN = 16
+PROMPT_LEN = 32
+CTX_LEN = 128
 BATCH_SIZE = 1
 FULL_BATCH_SIZE = 4
+DYNAMO = True
+DTYPE = torch.float16
 MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False}
 
-# ---------------------------------------------------------------------------
-# Load helpers
-# ---------------------------------------------------------------------------
 
-
-def skip_on_model_fetch_error(exc: Exception, model_id: str) -> None:
+def skip_on_hf_model_load_error(exc: Exception, model_id: str) -> None:
     pytest.skip(
-        f"Skipping {model_id}: model unavailable or unsupported in this environment ({type(exc).__name__}: {exc})"
+        f"Skipping {model_id}: HF model/tokenizer unavailable or unsupported in this environment "
+        f"({type(exc).__name__}: {exc})"
     )
 
 
@@ -115,6 +97,90 @@ def load_tokenizer(model_id: str, torch_dtype: torch.dtype) -> AutoTokenizer:
     return tokenizer
 
 
+def _hf_token_cache_key(tokenizer, model_hf, prompts, prompt_len, ctx_len, batch_size, full_batch_size):
+    model_name = getattr(model_hf.config, "_name_or_path", "") or getattr(model_hf.config, "name_or_path", "")
+    tokenizer_name = getattr(tokenizer, "name_or_path", "")
+    dtype = str(getattr(model_hf, "dtype", next(model_hf.parameters()).dtype))
+    return (
+        model_name,
+        tokenizer_name,
+        dtype,
+        tuple(prompts),
+        prompt_len,
+        ctx_len,
+        batch_size,
+        full_batch_size,
+    )
+
+
+def get_hf_tokens(
+    tokenizer,
+    model_hf,
+    prompts,
+    *,
+    prompt_len: int,
+    ctx_len: int,
+    batch_size: int = BATCH_SIZE,
+    full_batch_size: int | None = None,
+):
+    key = _hf_token_cache_key(tokenizer, model_hf, prompts, prompt_len, ctx_len, batch_size, full_batch_size)
+    if key in _HF_TOKEN_CACHE:
+        return copy.deepcopy(_HF_TOKEN_CACHE[key])
+
+    api_runner = ApiRunner(
+        batch_size=batch_size,
+        tokenizer=tokenizer,
+        config=model_hf.config,
+        prompt=prompts,
+        prompt_len=prompt_len,
+        ctx_len=ctx_len,
+        full_batch_size=full_batch_size,
+    )
+    if full_batch_size is None:
+        hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
+        assert hf_tokens is not None, "HF PT inference returned None"
+        _HF_TOKEN_CACHE[key] = copy.deepcopy(hf_tokens)
+        return copy.deepcopy(hf_tokens)
+
+    hf_tokens = api_runner.run_hf_model_on_pytorch_CB(model_hf)
+    assert hf_tokens is not None, "HF PT CB inference returned None"
+    _HF_TOKEN_CACHE[key] = copy.deepcopy(hf_tokens)
+    return copy.deepcopy(hf_tokens)
+
+
+def assert_hf_hw_parity(
+    model_id: str,
+    hf_tokens,
+    qaic_output,
+    *,
+    gen_len: int,
+    full_batch_size: int | None = None,
+    context: str = "",
+) -> None:
+    assert qaic_output is not None, "QAIC generate returned None"
+    assert hasattr(qaic_output, "generated_ids"), "QAIC generate did not return generated_ids"
+    assert qaic_output.generated_ids is not None, "QAIC generate returned generated_ids=None"
+
+    label = f" {context}" if context else ""
+    if full_batch_size is None:
+        qaic_tokens = qaic_output.generated_ids[0].flatten()[:gen_len]
+        if not np.array_equal(hf_tokens, qaic_tokens):
+            assert False, (
+                f"HF AIC HW{label} parity failed for {model_id}: HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"
+            )
+        return
+
+    assert len(hf_tokens) == full_batch_size
+    for batch_idx in range(full_batch_size):
+        hf_batch_tokens = np.asarray(hf_tokens[batch_idx]).flatten()[:gen_len]
+        qaic_batch_tokens = qaic_output.generated_ids[batch_idx].flatten()[:gen_len]
+        if not np.array_equal(hf_batch_tokens, qaic_batch_tokens):
+            assert False, (
+                f"HF AIC HW{label} CB parity failed for {model_id} batch {batch_idx}: "
+                f"HF={hf_batch_tokens.tolist()}, QAIC={qaic_batch_tokens.tolist()}"
+            )
+
+
 def exported_onnx_path(export_result) -> Path:
     if isinstance(export_result, (list, tuple)):
         export_result = export_result[-1]
@@ -123,24 +189,8 @@ def exported_onnx_path(export_result) -> Path:
     return onnx_path
 
 
-# ---------------------------------------------------------------------------
-# Dynamo ONNX export cache — shared across all tests/dynamo/ test modules.
-#
-# dynamo=True + use_onnx_subfunctions=True export is expensive (torch.export
-# graph capture + subfunction extraction), and multiple test modules
-# (test_on_qaic.py, test_ccl.py) each need the same basic/continuous_batching
-# export per model to then compile it under different flags (single vs
-# multi-device, with vs without CCL specializations). Key on
-# (model_id, torch_dtype, continuous_batching, ccl_enabled) -- the only
-# export-time knobs that change the resulting graph/weights. Compile-time-only
-# flags (mxfp6_matmul, num_devices, comp_ctx_lengths_prefill/decode, ...) must
-# NOT be part of this key since they don't affect the exported ONNX. Note the
-# QAIC compiler itself never emits an fp32 QPC -- CUSTOM_IO_DTYPE_MAP maps
-# torch.float32 to "float16" same as torch.float16 (see modeling_auto.py), so
-# convert_to_fp16 is derived from the PyTorch model's dtype, not requested at
-# compile(); torch_dtype here changes the exported ONNX *weights*, not what
-# the compiler outputs.
-# ---------------------------------------------------------------------------
+# Export cache shared by QAIC Dynamo tests. The key only includes export-time
+# knobs; compile-time options still get their own QPCs per test.
 _DYNAMO_ONNX_CACHE: Dict[Tuple[str, torch.dtype, bool, bool], Tuple[str, "QEFFAutoModelForCausalLM"]] = {}
 
 
@@ -152,30 +202,31 @@ def get_dynamo_export(
     continuous_batching: bool = False,
     ccl_enabled: bool = False,
 ) -> Tuple[str, QEFFAutoModelForCausalLM]:
-    """Export once per (model_id, torch_dtype, continuous_batching, ccl_enabled) combination
-    and cache the (onnx_path, qeff_model) pair for reuse by every test that needs that exact export.
-
-    Callers still perform their own compile()/generate() against the returned qeff_model --
-    only the (expensive) export step is shared.
-    """
+    """Export once per compatible Dynamo graph shape and cache the ONNX path."""
     key = (model_id, torch_dtype, continuous_batching, ccl_enabled)
     if key in _DYNAMO_ONNX_CACHE:
         return _DYNAMO_ONNX_CACHE[key]
 
-    model_hf = load_hf_model(model_id, torch_dtype=torch_dtype)
     kwargs: Dict[str, object] = {}
     if continuous_batching:
         kwargs["continuous_batching"] = True
     if ccl_enabled:
         kwargs["qaic_config"] = {"ccl_enabled": True}
 
-    qeff_model = QEFFAutoModelForCausalLM(model_hf, **kwargs)
+    try:
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            **kwargs,
+        )
+    except Exception as exc:
+        skip_on_hf_model_load_error(exc, model_id)
 
     export_dir = tmp_path_factory.mktemp("dynamo_export", numbered=True)
     onnx_path = exported_onnx_path(
         qeff_model.export(
             export_dir,
-            dynamo=True,
+            dynamo=DYNAMO,
             use_onnx_subfunctions=True,
         )
     )
@@ -183,22 +234,11 @@ def get_dynamo_export(
     return _DYNAMO_ONNX_CACHE[key]
 
 
-# ---------------------------------------------------------------------------
-# ONNX assertion helpers
-# ---------------------------------------------------------------------------
-
-
 def assert_has_subfunctions(onnx_path: Path, qeff_model: QEFFAutoModelForCausalLM) -> None:
-    """Assert the ONNX graph contains at least one decoder-block subfunction.
-
-    CtxScatter/CtxGather/CustomRMSNorm always appear as functions regardless of
-    use_onnx_subfunctions, so checking len(model.functions) > 0 is not sufficient.
-    We require at least one function whose name contains a decoder class name from
-    get_submodules_for_export(), matching the main suite's approach.
-    """
+    """Assert the ONNX graph contains at least one decoder-block subfunction."""
     get_submodules = getattr(qeff_model.model, "get_submodules_for_export", None)
     if not callable(get_submodules):
-        return  # Model doesn't declare submodule boundaries — skip check
+        return
 
     submodule_classes = get_submodules()
     if not submodule_classes:
@@ -221,7 +261,7 @@ def assert_subfunction_names_match_decoder_class(onnx_path: Path, qeff_model: QE
     """Verify RenameRepeatedSubgraphTransform renamed functions to decoder class names."""
     get_submodules = getattr(qeff_model.model, "get_submodules_for_export", None)
     if not callable(get_submodules):
-        return  # Model doesn't declare submodule boundaries — skip name check
+        return
 
     submodule_classes = get_submodules()
     if not submodule_classes:
@@ -235,7 +275,7 @@ def assert_subfunction_names_match_decoder_class(onnx_path: Path, qeff_model: QE
     model = onnx.load(str(onnx_path), load_external_data=False)
     for fn in model.functions:
         assert not any(fn.name.startswith(pat) for pat in ("repeated_subgraph", "subgraph_", "invoke_subgraph_")), (
-            f"Function '{fn.name}' still has raw dynamo name — "
+            f"Function '{fn.name}' still has raw dynamo name: "
             f"RenameRepeatedSubgraphTransform did not rename it. "
             f"Expected a name derived from {expected_names}."
         )
