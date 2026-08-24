@@ -396,10 +396,11 @@ class QEFFBaseModel(ABC):
                 ordered_shapes[k] = dynamic_shapes[k]
         example_inputs = {**ordered_inputs, **{k: v for k, v in example_inputs.items() if k not in sig_key_set}}
         if dynamic_shapes is not None:
-            dynamic_shapes = {**ordered_shapes, **{k: v for k, v in dynamic_shapes.items() if k not in sig_key_set}}
+            # dynamic_shapes = {**ordered_shapes, **{k: v for k, v in dynamic_shapes.items() if k not in sig_key_set}}
+            dynamic_shapes = {k: dynamic_shapes.get(k, {}) for k in example_inputs}
 
         export_kwargs = dict(export_kwargs)
-        export_kwargs.setdefault("report", False)
+        export_kwargs.setdefault("report", True)
         export_kwargs.setdefault("optimize", False)
         export_kwargs["dynamo"] = True
         export_kwargs["custom_translation_table"] = {

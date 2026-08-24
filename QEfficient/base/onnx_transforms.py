@@ -415,6 +415,61 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         return changed
 
 
+class MaterializePassthroughRetainedStateTransform(BaseOnnxTransform):
+    """Give VLM passthrough retained-state values (for example ``vision_embeds_RetainedState``)
+    their own graph input, distinct from the output of the same name.
+
+    Multimodal decoder wrappers (Qwen2.5-VL, Llama4, LLaVA, ...) return the vision-embedding
+    input unchanged so downstream generation steps can feed it back in, e.g.
+    ``return logits, vision_embeds, image_idx, ...`` in
+    ``QEffQwen_2_5_vl_DecoderWrapper.forward``. Because that tensor flows straight from input to
+    output with no producing node in between, and ``output_names`` assigns it the name
+    ``vision_embeds_RetainedState``, torch.onnx.export's dynamo path applies that same name to
+    *both* the graph input and the graph output — there is no separate ``vision_embeds`` input
+    left in the exported graph at all. The AIC compiler's ``-retained-state`` flag pairs an input
+    named ``X`` with an output named ``X_RetainedState``; with both ends already called
+    ``X_RetainedState``, it instead finds a duplicate placeholder ("Found pre-existing PH by name
+    ..."). This is a naming collision introduced during ONNX export, not a torch.export aliasing
+    violation — export itself succeeds; the failure only surfaces later, during ONNX
+    serialization or AIC compilation. Renaming the graph input back to the bare name and bridging
+    it to the retained-state output with an explicit Identity node — the same idiom used by
+    AdapterWeightsToInputsTransform for LoRA weights — restores the two distinct names the
+    compiler's naming convention expects.
+    """
+
+    @classmethod
+    def apply(cls, model: ModelProto) -> bool:
+        graph = model.graph
+        produced_names = {name for node in graph.node for name in node.output}
+
+        candidates = [
+            value for value in graph.input if value.name.endswith("_RetainedState") and value.name not in produced_names
+        ]
+        if not candidates:
+            return False
+
+        graph_output_names = {out.name for out in graph.output}
+        changed = False
+
+        for value in candidates:
+            retained_name = value.name
+            if retained_name not in graph_output_names:
+                continue
+            base_name = retained_name[: -len("_RetainedState")]
+
+            value.name = base_name
+            for node in graph.node:
+                node.input[:] = [base_name if n == retained_name else n for n in node.input]
+
+            identity_node = onnx.helper.make_node(
+                "Identity", [base_name], [retained_name], name=f"{base_name}_identity"
+            )
+            graph.node.append(identity_node)
+            changed = True
+
+        return changed
+
+
 class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
     """Rename dynamo repeated_subgraph function names to model-specific layer class names.
 
@@ -655,6 +710,11 @@ class OnnxTransformPipeline(BaseOnnxTransform):
 
         if PreserveNestedCacheRetainedStateTransform in requested:
             applied[PreserveNestedCacheRetainedStateTransform] = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        if MaterializePassthroughRetainedStateTransform in requested:
+            applied[MaterializePassthroughRetainedStateTransform] = MaterializePassthroughRetainedStateTransform.apply(
+                model
+            )
 
         if RenameRepeatedSubgraphTransform in requested:
             applied[RenameRepeatedSubgraphTransform] = RenameRepeatedSubgraphTransform.apply(model, **kwargs)

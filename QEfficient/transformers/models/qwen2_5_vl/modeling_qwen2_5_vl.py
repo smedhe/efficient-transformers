@@ -226,7 +226,7 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
 
         x_expanded = pos_ids.unsqueeze(0)
         x_expanded = x_expanded.expand(bs, -1, -1)
-        pos_ids = x_expanded.reshape(-1, pos_ids.size(1))
+        pos_ids = x_expanded.reshape(-1, pos_ids.size(1))  # check size of t
 
         max_grid_size = max(grid_thw.shape)
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
@@ -277,7 +277,7 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
 
         mask = (index_padded == -100).to(torch.int32)
 
-        if torch.jit.is_tracing():
+        if torch.jit.is_tracing() or torch._dynamo.is_compiling():
             order = torch.argsort(mask)
         else:
             order = torch.argsort(mask, stable=True)
@@ -316,7 +316,8 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
         window_index, cu_window_seqlens = self.get_window_index(grid_thw)
 
         cu_window_seqlens = cu_window_seqlens.to(
-            device=hidden_states.device, dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32
+            device=hidden_states.device,
+            dtype=grid_thw.dtype if torch.jit.is_tracing() or torch._dynamo.is_compiling() else torch.int32,
         )
 
         # cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
@@ -416,10 +417,11 @@ def eager_attention_forward(
 
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) / math.sqrt(module.head_dim)
 
+    mask_value = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights.dtype)
+
     if attention_mask is not None:
-        attn_weights = torch.where(
-            attention_mask, torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=module.config.torch_dtype), attn_weights
-        )
+        # Apply the attention mask
+        attn_weights = torch.where(attention_mask, mask_value, attn_weights)
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -465,7 +467,7 @@ class QEffQwen2_5_VLAttention(Qwen2_5_VLAttention):
 
         query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos_cached, sin_cached)
 
-        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        past_seen_tokens = past_key_values.get_seq_length(self.layer_idx) if past_key_values is not None else 0
         blocking_config = getattr(self, "attn_blocking_config", AttentionBlockingConfig())
         use_blocking = blocking_config is not None and (blocking_config.mode != BlockingMode.NONE)
         if use_blocking:
@@ -586,8 +588,8 @@ class QEffQwen2_5_VLDecoderLayer(Qwen2_5_VLDecoderLayer):
         if output_attentions:
             outputs += (self_attn_weights,)
 
-        if use_cache:
-            outputs += (present_key_value,)
+        # if use_cache:
+        #     outputs += (present_key_value,)
 
         return outputs
 
@@ -832,48 +834,45 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
         continuous_batching: bool = False,
         **kwargs,
     ):
+
+        bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
+        fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
+
         prefill_seq_len = kwargs.get("prefill_seq_len", constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)
         if prefill_seq_len is None:
             prefill_seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         prefill_seq_len = int(prefill_seq_len)
         inputs_shapes = {}
-        inputs_shapes["input_ids"] = (constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE, prefill_seq_len)
+        inputs_shapes["input_ids"] = (bs, prefill_seq_len)
 
         vision_size = 3577
         inputs_shapes["vision_embeds"] = (
-            constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE,
+            bs,
             vision_size,
             self.model.config.text_config.hidden_size,
         )
-        inputs_shapes["image_grid_thw"] = (1, 1, 98, 146)
+        inputs_shapes["image_grid_thw"] = (bs, 1, 98, 146)
         inputs_shapes["position_ids"] = (
             3,
-            constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE,
+            bs,
             prefill_seq_len,
         )
         inputs_shapes["pixel_values"] = (14308, 1176)
         inputs_shapes["image_idx"] = (1, 1)
-        inputs_shapes["image_sizes"] = (constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE, 2)
+        inputs_shapes["image_sizes"] = (bs, 2)
         # Define inputs
         vision_inputs = {}
         lang_inputs = {}
-        vision_inputs["pixel_values"] = torch.zeros((inputs_shapes["pixel_values"]), dtype=self.config.torch_dtype)
+        vision_inputs["pixel_values"] = torch.zeros((inputs_shapes["pixel_values"]), dtype=self.config.dtype)
         vision_inputs["image_grid_thw"] = torch.zeros((inputs_shapes["image_grid_thw"]), dtype=torch.int64)
         lang_inputs["input_ids"] = torch.zeros((inputs_shapes["input_ids"]), dtype=torch.int64)
-        lang_inputs["vision_embeds"] = torch.zeros((inputs_shapes["vision_embeds"]), dtype=self.config.torch_dtype)
+        lang_inputs["vision_embeds"] = torch.zeros((inputs_shapes["vision_embeds"]), dtype=self.config.dtype)
         lang_inputs["position_ids"] = (
-            (
-                torch.arange(prefill_seq_len, dtype=torch.int64)
-                .view(1, prefill_seq_len)
-                .repeat(constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE, 1)
-            )
+            (torch.arange(prefill_seq_len, dtype=torch.int64).view(1, prefill_seq_len).repeat(bs, 1))
             .unsqueeze(0)
             .repeat(4, 1, 1)
         )
         lang_inputs["image_idx"] = torch.zeros((inputs_shapes["image_idx"]), dtype=torch.int64)
-
-        bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
-        fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
 
         # Add data for KV
         kv_cache_shape = get_padding_shape_from_config(
@@ -885,7 +884,7 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
         lang_inputs["past_key_values"] = [[] for _ in range(self.model.config.text_config.num_hidden_layers)]
         for i in range(self.model.config.text_config.num_hidden_layers):
             for kv in ["key", "value"]:
-                lang_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape, dtype=self.config.torch_dtype))
+                lang_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape, dtype=self.config.dtype))
 
         if continuous_batching:
             lang_inputs["batch_index"] = torch.arange(bs).view(bs, 1)
@@ -1174,7 +1173,7 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
             IOInfo(name="attention_mask", datatype=torch.int64, shape=("batch_size", "seq_len")),
             IOInfo(
                 name="pixel_values",
-                datatype=self.config.torch_dtype,
+                datatype=self.config.dtype,
                 shape=("batch_size", 3, "image_size", "image_size"),
             ),
         ]

@@ -1126,6 +1126,7 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
             export_dir=export_dir,
             offload_pt_weights=offload_pt_weights,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+            dynamo=kwargs.get("dynamo", False),
         )
 
     def compile(
@@ -1328,6 +1329,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 export_dir=export_dir,
                 offload_pt_weights=offload_pt_weights,
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+                dynamo=kwargs.get("dynamo", False),
             )
 
     def compile(
@@ -1547,6 +1549,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         layerwise_window_size: int = 1,
         kv_cache_prefix: Optional[str] = None,
         offload_pt_weights: Optional[bool] = None,
+        dynamo: Optional[bool] = False,
         **kwargs,
     ) -> str:
         """
@@ -1570,6 +1573,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             A list containing the paths to the generated ONNX graph files for both components.
         """
         layerwise_cache_probe = kwargs.pop("_layerwise_cache_probe", False)
+        if dynamo and layerwise:
+            raise NotImplementedError("Dynamo image-text export uses dual-QPC dynamo export, not layerwise export.")
         if layerwise:
             return self._run_layerwise_export(
                 export_dir=export_dir,
@@ -1662,6 +1667,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 export_dir=export_dir,
                 offload_pt_weights=False,
                 use_onnx_subfunctions=use_onnx_subfunctions,
+                dynamo=dynamo,
             )
 
         # TODO: remove the current pt weight offload capability once CustomLoader is in place
@@ -1686,6 +1692,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 prefill_seq_len=prefill_seq_len,
                 _layerwise_cache_probe=layerwise_cache_probe,
                 kv_cache_prefix=kv_cache_prefix,
+                dynamo=dynamo,
             )
         return self.onnx_path
 
@@ -1871,6 +1878,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         layerwise_window_size: int = 1,
         kv_cache_prefix: Optional[str] = None,
         moe_prefill_packed_chunk_size: int = constants.MOE_PREFILL_PACKED_CHUNK_SIZE,
+        dynamo: Optional[bool] = False,
         **compiler_options,
     ) -> str:
         """
@@ -2081,6 +2089,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 _layerwise_cache_probe=layerwise_cache_probe,
                 kv_cache_prefix=kv_cache_prefix,
                 offload_pt_weights=offload_pt_weights,
+                dynamo=dynamo,
             )
             if layerwise_cache_probe:
                 return self.lang_model.onnx_path
@@ -2118,6 +2127,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 custom_io=custom_io_vision,
                 mxint8_kv_cache=mxint8_kv_cache,
                 use_onnx_subfunctions=use_onnx_subfunctions,
+                dynamo=dynamo,
                 **compiler_options_vision,
             )
             self.qpc_paths["vision_qpc_path"] = vision_qpc_path
@@ -2180,6 +2190,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 custom_io=custom_io_lang,
                 mxint8_kv_cache=mxint8_kv_cache,
                 use_onnx_subfunctions=use_onnx_subfunctions,
+                dynamo=dynamo,
                 **compiler_options,
             )
             self.qpc_paths.update({qpc_key: lang_qpc_path})
@@ -3363,10 +3374,19 @@ class QEFFAutoModelForImageTextToText:
             If `continuous_batching` is provided as True.
         """
         enable_proxy = kwargs.pop("enable_proxy", False)
+        dynamo = kwargs.pop("dynamo", False)
+
+        if dynamo:
+            kv_offload = True
 
         # TODO: add a check to see if kv_offload is allowed for given model by loading the config and checking architecture or type of config here.
         if continuous_batching and not kv_offload:
             NotImplementedError("Continuous batching is not supported for kv_offload = False")
+
+        if dynamo and continuous_batching:
+            raise NotImplementedError(
+                "Weight-free image-text export supports dual QPC only and no continuous batching yet."
+            )
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
