@@ -101,6 +101,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 dim_registry[dim_name] = Dim("num_image_tokens", min=1, max=max_image_dim)
             elif dim_name in {"grid_h", "grid_w"}:
                 dim_registry[dim_name] = Dim(dim_name, min=1, max=max_image_dim)
+            elif dim_name in {"grid_height", "grid_width"}:
+                dim_registry[dim_name] = Dim(dim_name, min=1, max=max_image_dim)
             elif "sliding_window" in dim_name:
                 dim_registry[dim_name] = Dim(
                     "sliding_window",

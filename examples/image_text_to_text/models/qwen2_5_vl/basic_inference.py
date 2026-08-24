@@ -89,7 +89,7 @@ else:
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         aic_enable_depth_first=True,
-        dynamo=False,
+        dynamo=True,
         use_onnx_subfunctions=True,
         mos=1,
     )

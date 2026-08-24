@@ -224,9 +224,7 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
         pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
 
-        x_expanded = pos_ids.unsqueeze(0)
-        x_expanded = x_expanded.expand(bs, -1, -1)
-        pos_ids = x_expanded.reshape(-1, pos_ids.size(1))  # check size of t
+        pos_ids = pos_ids.repeat(bs, 1)  # check size of t
 
         max_grid_size = max(grid_thw.shape)
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
@@ -269,9 +267,7 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
 
         seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
 
-        x_expanded = seqlens.unsqueeze(0)
-        x_expanded = x_expanded.expand(bs, -1)
-        seqlens = x_expanded.reshape(-1)
+        seqlens = seqlens.repeat(bs)
 
         index_padded = index_padded.reshape(-1)
 
@@ -762,8 +758,8 @@ class QEffQwen_2_5_vl_EncoderWrapper(nn.Module):
     def forward(self, pixel_values, image_grid_thw):
         image_embeds = self.model.visual(pixel_values, grid_thw=image_grid_thw)
         bs = image_grid_thw.shape[0]
-        split_size = torch.floor_divide(torch.tensor(image_embeds.size(0)), bs)
-        image_embeds = image_embeds.reshape(bs, split_size, image_embeds.size(1))
+        split_size = image_embeds.shape[0] // bs
+        image_embeds = image_embeds.reshape(bs, split_size, image_embeds.shape[-1])
 
         return image_embeds
 
