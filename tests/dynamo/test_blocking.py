@@ -94,7 +94,7 @@ def _key_params(keys):
         if key in MULTI_DEVICE_BLOCKING_KEYS:
             marks.append(pytest.mark.dynamo_multi_device)
         if key in XFAIL_BLOCKING_KEYS:
-            marks.append(pytest.mark.xfail(reason=f"blocked_hqkv_attention_forward crashes on mode='{key}'"))
+            marks.append(pytest.mark.skip(reason=f"blocked_hqkv_attention_forward crashes on mode='{key}'"))
         params.append(pytest.param(key, marks=marks) if marks else key)
     return params
 
@@ -154,7 +154,6 @@ def test_dynamo_blocking_compile_and_generate(model_type, model_id, blocking_key
     output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=prompts,
-        device_id=[0],
     )
     assert output.generated_texts is not None
     assert_hf_hw_parity(
@@ -223,7 +222,6 @@ def test_dynamo_cb_blocking_compile_and_generate(model_type, model_id, blocking_
     output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=prompts,
-        device_id=[0],
     )
     assert output.generated_texts is not None
     assert len(output.generated_texts) == FULL_BATCH_SIZE

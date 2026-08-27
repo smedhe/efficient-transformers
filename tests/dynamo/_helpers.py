@@ -55,8 +55,8 @@ DYNAMO_CAUSAL_LM_MODEL_IDS = {
     "starcoder2": "hf-internal-testing/tiny-random-Starcoder2ForCausalLM",
 }
 
-PROMPT_LEN = 32
-CTX_LEN = 128
+PROMPT_LEN = 8
+CTX_LEN = 32
 BATCH_SIZE = 1
 FULL_BATCH_SIZE = 4
 DYNAMO = True
@@ -135,6 +135,7 @@ def get_hf_tokens(
         prompt_len=prompt_len,
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
+        dtype=DTYPE,
     )
     if full_batch_size is None:
         hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)

@@ -36,7 +36,6 @@ def _generate(qeff_model, tokenizer, prompts, model_id, hf_tokens, full_batch_si
     output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=prompts,
-        device_id=[0],
     )
     assert output.generated_texts is not None
     assert_hf_hw_parity(

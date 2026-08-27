@@ -56,6 +56,7 @@ def test_dynamo_export_and_ort_parity(model_type, model_id, tmp_export_dir):
         prompt_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
         full_batch_size=None,
+        dtype=DTYPE,
     )
     hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
 

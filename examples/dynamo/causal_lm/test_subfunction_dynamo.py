@@ -14,18 +14,18 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 from QEfficient.utils.run_utils import ApiRunner
 
 torch.manual_seed(42)
-# model_name = "openai/gpt-oss-20b"
+model_name = "openai/gpt-oss-20b"
 # model_name = "meta-llama/Llama-3.2-1B"
 # model_name = "gpt2"
 # model_name = "hf-internal-testing/tiny-random-Olmo2ForCausalLM"
 # model_name = "tiny-random/gpt-oss-bf16"
 # model_name = "hf-internal-testing/tiny-random-LlamaForCausalLM"
 # model_name = "ibm-granite/granite-3.1-3b-a800m-instruct"
-model_name = "hf-tiny-v2/tiny-random-GraniteForCausalLM"
+# model_name = "hf-tiny-v2/tiny-random-GraniteForCausalLM"
 
 config = AutoConfig.from_pretrained(model_name)
-# config.num_hidden_layers = 8
-config.dtype = torch.float16
+config.num_hidden_layers = 4
+config.dtype = torch.float32
 tokenizer = AutoTokenizer.from_pretrained(model_name, config=config)
 print(config)
 runner = ApiRunner(
@@ -35,7 +35,7 @@ runner = ApiRunner(
     prompt=["My name is"],
     prompt_len=32,
     ctx_len=128,
-    dtype=torch.float16,
+    dtype=torch.float32,
 )
 
 # PyTorch (KV) output
@@ -62,7 +62,7 @@ print(output)
 print(output.generated_ids)
 qeff_tokens = output.generated_ids[0][:, : pt_tokens.shape[-1]]
 
-# assert np.allclose(hf_tokens, pt_tokens), "HF and PT outputs do not match"
+assert np.allclose(hf_tokens, pt_tokens), "HF and PT outputs do not match"
 
 assert np.allclose(pt_tokens, ort_tokens), "PT and ORT outputs do not match"
 assert np.allclose(qeff_tokens, pt_tokens), "PT and QEff outputs do not match"
