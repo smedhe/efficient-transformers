@@ -43,6 +43,7 @@ from QEfficient.transformers.moe import (
     silu_glu_mlp,
 )
 from QEfficient.utils import constants
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 _FP16_CLAMP_MIN = -65504.0
 _FP16_CLAMP_MAX = 65504.0
@@ -541,6 +542,7 @@ class QEffGemma4TextDecoderLayer(Gemma4TextDecoderLayer):
         post_norm = self._modules.pop("post_feedforward_layernorm_2")
         self.moe_block = QEffGemma4TextMoeBlock(router, experts, pre_norm, post_norm)
 
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,

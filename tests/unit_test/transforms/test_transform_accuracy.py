@@ -1416,6 +1416,43 @@ class TestSplitOptimizedMoETransform:
             transforms = wrapper._pytorch_transforms
             assert transforms.index(KVCacheTransform) < transforms.index(SimpleDecodeMoeTransform)
 
+    def test_glm4_moe_decoder_layers_are_marked_by_mlp_kind(self):
+        from QEfficient.transformers.models.glm4_moe.modeling_glm4_moe import (
+            QEffGlm4MoeDenseDecoderLayer,
+            QEffGlm4MoeSparseDecoderLayer,
+        )
+
+        config = AutoConfig.for_model(
+            "glm4_moe",
+            max_position_embeddings=128,
+            num_hidden_layers=3,
+            num_attention_heads=4,
+            hidden_size=64,
+            intermediate_size=128,
+            moe_intermediate_size=32,
+            vocab_size=127,
+            num_key_value_heads=2,
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            first_k_dense_replace=1,
+            n_group=1,
+            topk_group=1,
+            head_dim=16,
+        )
+        model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
+        qeff = QEFFAutoModelForCausalLM(model, continuous_batching=False)
+
+        layers = list(qeff.model.model.layers)
+        assert isinstance(layers[0], QEffGlm4MoeDenseDecoderLayer)
+        assert all(isinstance(layer, QEffGlm4MoeSparseDecoderLayer) for layer in layers[1:])
+        assert qeff.model.get_submodules_for_export() == {
+            QEffGlm4MoeDenseDecoderLayer,
+            QEffGlm4MoeSparseDecoderLayer,
+        }
+        dense_forward = layers[0].forward.__func__.__marked_compile_region_fn__
+        sparse_forward = layers[1].forward.__func__.__marked_compile_region_fn__
+        assert dense_forward.__code__ is not sparse_forward.__code__
+
     def test_moe_component_mappings_owned_by_optimized_mapper(self):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextRouter
         from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeMoE, Glm4MoeTopkRouter

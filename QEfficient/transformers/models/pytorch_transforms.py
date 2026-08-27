@@ -373,10 +373,12 @@ from QEfficient.transformers.models.gemma4.modeling_gemma4 import (
 from QEfficient.transformers.models.glm4_moe.modeling_glm4_moe import (
     QEffGlm4MoeAttention,
     QEffGlm4MoeDecoderLayer,
+    QEffGlm4MoeDenseDecoderLayer,
     QEffGlm4MoeForCausalLM,
     QEffGlm4MoeModel,
     QEffGlm4MoeMoE,
     QEffGlm4MoeRotaryEmbedding,
+    QEffGlm4MoeSparseDecoderLayer,
     QEffGlm4MoeTopkRouter,
 )
 from QEfficient.transformers.models.gpt2.modeling_gpt2 import (
@@ -1483,6 +1485,25 @@ def _resolve_expert_parallel_layout(
     return total_avl_cores, num_pipeline_stages, num_parallelized_experts, experts_per_soc
 
 
+class Glm4MoeDecoderLayerSubfunctionTransform(PytorchTransform):
+    """Split GLM4-MoE decoder layer identities by dense vs routed MLP body."""
+
+    @classmethod
+    def apply(cls, model: nn.Module) -> Tuple[nn.Module, bool]:
+        transformed = False
+        sparse_mlp_classes = (Glm4MoeMoE, QEffGlm4MoeMoE)
+        marker_classes = (QEffGlm4MoeDenseDecoderLayer, QEffGlm4MoeSparseDecoderLayer)
+        for module in model.modules():
+            if not isinstance(module, QEffGlm4MoeDecoderLayer) or isinstance(module, marker_classes):
+                continue
+            if isinstance(getattr(module, "mlp", None), sparse_mlp_classes):
+                module.__class__ = QEffGlm4MoeSparseDecoderLayer
+            else:
+                module.__class__ = QEffGlm4MoeDenseDecoderLayer
+            transformed = True
+        return model, transformed
+
+
 class OptimizedMoEMapperTransform(ModuleMappingTransform):
     """Replace in-tree MoE components with QEff implementations."""
 
@@ -1772,8 +1793,9 @@ class OptimizedMoETransform(PytorchTransform):
     ) -> Tuple[nn.Module, bool]:
         model, mapped = OptimizedMoEMapperTransform.apply(model)
         model, external_mapped = ExternalOptimizedMoEMapperTransform.apply(model)
+        model, glm4_decoder_marked = Glm4MoeDecoderLayerSubfunctionTransform.apply(model)
         if not (mapped or external_mapped):
-            return model, False
+            return model, glm4_decoder_marked
 
         model, weights_ready = OptimizedMoEWeightsTransform.apply(model)
         model, export_configured = OptimizedMoEExportConfigTransform.apply(
@@ -1786,7 +1808,15 @@ class OptimizedMoETransform(PytorchTransform):
             hash_params=hash_params,
         )
         _, expert_parallel_weights_ready = OptimizedMoEExpertParallelWeightsTransform.apply(model)
-        return model, mapped or external_mapped or weights_ready or export_configured or expert_parallel_weights_ready
+        return (
+            model,
+            mapped
+            or external_mapped
+            or glm4_decoder_marked
+            or weights_ready
+            or export_configured
+            or expert_parallel_weights_ready,
+        )
 
 
 class SimpleDecodeMoeTransform(OptimizedMoETransform):

@@ -45,6 +45,7 @@ from QEfficient.transformers.moe import (
     stack_expert_linears,
 )
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 
 class QEffGlm4MoeRotaryEmbedding(Glm4MoeRotaryEmbedding):
@@ -416,6 +417,90 @@ class QEffGlm4MoeDecoderLayer(Glm4MoeDecoderLayer):
         return hidden_states
 
 
+class QEffGlm4MoeDenseDecoderLayer(QEffGlm4MoeDecoderLayer):
+    @qeff_nested_compile_region
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        comp_ctx_lengths: Optional[torch.LongTensor] = None,
+        batch_index: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        sin_cached: Optional[torch.Tensor] = None,
+        cos_cached: Optional[torch.Tensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor]:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            comp_ctx_lengths=comp_ctx_lengths,
+            batch_index=batch_index,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            sin_cached=sin_cached,
+            cos_cached=cos_cached,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+
+class QEffGlm4MoeSparseDecoderLayer(QEffGlm4MoeDecoderLayer):
+    @qeff_nested_compile_region
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        comp_ctx_lengths: Optional[torch.LongTensor] = None,
+        batch_index: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        sin_cached: Optional[torch.Tensor] = None,
+        cos_cached: Optional[torch.Tensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor]:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            comp_ctx_lengths=comp_ctx_lengths,
+            batch_index=batch_index,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            sin_cached=sin_cached,
+            cos_cached=cos_cached,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+
 class QEffGlm4MoeModel(Glm4MoeModel):
     def __qeff_init__(self):
         self.rotary_emb = QEffGlm4MoeRotaryEmbedding(config=self.config)
@@ -666,7 +751,7 @@ class QEffGlm4MoeForCausalLM(Glm4MoeForCausalLM):
     """
 
     def get_submodules_for_export(self) -> Type[nn.Module]:
-        return {QEffGlm4MoeDecoderLayer}
+        return {QEffGlm4MoeDenseDecoderLayer, QEffGlm4MoeSparseDecoderLayer}
 
     def forward(
         self,

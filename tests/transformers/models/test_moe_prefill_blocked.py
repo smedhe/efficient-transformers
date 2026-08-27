@@ -73,6 +73,16 @@ def _first_tensor(output):
     return output[0] if isinstance(output, tuple) else output
 
 
+def _glm4_decoder_functions(onnx_model):
+    prefixes = ("QEffGlm4MoeDenseDecoderLayer", "QEffGlm4MoeSparseDecoderLayer")
+    return [func for func in onnx_model.functions if func.name.startswith(prefixes)]
+
+
+def _count_glm4_decoder_call_nodes(onnx_model):
+    prefixes = ("QEffGlm4MoeDenseDecoderLayer", "QEffGlm4MoeSparseDecoderLayer")
+    return sum(1 for node in onnx_model.graph.node if node.op_type.startswith(prefixes))
+
+
 def _match_expected_shape(actual: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
     if actual.shape == expected.shape:
         return actual
@@ -566,8 +576,9 @@ def test_glm4_moe_prefill_chunked_subfunction_export_contains_cumsum_custom_ops(
     )
 
     onnx_model = onnx.load(str(onnx_path), load_external_data=False)
-    decoder_functions = [func for func in onnx_model.functions if func.name.startswith("QEffGlm4MoeDecoderLayer")]
-    assert len(decoder_functions) == config.num_hidden_layers
+    decoder_functions = _glm4_decoder_functions(onnx_model)
+    assert decoder_functions
+    assert _count_glm4_decoder_call_nodes(onnx_model) == config.num_hidden_layers
 
     for function_proto in decoder_functions:
         op_counts = Counter(node.op_type for node in function_proto.node)
@@ -614,11 +625,9 @@ def test_glm4_moe_kv_blocking_transform_and_prefill_export(tmp_path):
         offload_pt_weights=False,
     )
     onnx_model = onnx.load(str(onnx_path), load_external_data=False)
-    decoder_functions = [func for func in onnx_model.functions if func.name.startswith("QEffGlm4MoeDecoderLayer")]
+    decoder_functions = _glm4_decoder_functions(onnx_model)
     assert decoder_functions
-    assert (
-        Counter(node.op_type for node in onnx_model.graph.node)["QEffGlm4MoeDecoderLayer"] == config.num_hidden_layers
-    )
+    assert _count_glm4_decoder_call_nodes(onnx_model) == config.num_hidden_layers
     for function_proto in decoder_functions:
         op_counts = Counter(node.op_type for node in function_proto.node)
         assert op_counts["CtxGatherBlockedKV"] == 4

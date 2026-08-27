@@ -10,7 +10,7 @@ Unit tests for the dynamo-specific transforms and context managers introduced
 in the enable_dynamo_for_causallm branch.
 
 Covered:
-  - temporarily_enable_nested_compile_regions
+  - qeff_nested_compile_region
   - PreserveNestedCacheRetainedStateTransform
   - RenameRepeatedSubgraphTransform
   - PruneFakeInitializersTransform
@@ -33,7 +33,7 @@ from QEfficient.base.onnx_transforms import (
 )
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-from QEfficient.utils.torch_patches import temporarily_enable_nested_compile_regions
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -124,56 +124,47 @@ def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_coun
 
 
 # ---------------------------------------------------------------------------
-# TestTemporarilyEnableNestedCompileRegions
+# TestQEffNestedCompileRegionDecorator
 # ---------------------------------------------------------------------------
 
 
-class TestTemporarilyEnableNestedCompileRegions:
-    def test_patches_decoder_layers_and_restores(self):
+class TestQEffNestedCompileRegionDecorator:
+    def test_decoder_layer_forward_is_decorated(self):
         model_hf, _ = make_tiny_llama()
         qeff_model = QEFFAutoModelForCausalLM(model_hf)
-        inner_model = qeff_model.model
+        decoder_layers = [m for m in qeff_model.model.modules() if isinstance(m, QEffLlamaDecoderLayer)]
 
-        decoder_layers = [m for m in inner_model.modules() if isinstance(m, QEffLlamaDecoderLayer)]
-        assert len(decoder_layers) > 0, "No QEffLlamaDecoderLayer found in wrapped model"
+        assert decoder_layers
+        assert all(getattr(layer.forward, "__marked_compile_region_fn__", None) is not None for layer in decoder_layers)
 
-        original_qualnames = [getattr(m.forward, "__qualname__", "") for m in decoder_layers]
+    def test_decorator_uses_torch_nested_compile_region_when_available(self, monkeypatch):
+        calls = []
 
-        with temporarily_enable_nested_compile_regions(inner_model, target_classes=[QEffLlamaDecoderLayer]):
-            for m in decoder_layers:
-                fwd = getattr(m, "forward", None)
-                qualname = getattr(fwd, "__qualname__", "")
-                assert (
-                    "mark_compile_region" in qualname or "nested_compile_region" in qualname or "inner" in qualname
-                ), (
-                    f"Expected nested_compile_region wrapper on {m.__class__.__name__}.forward, "
-                    f"got qualname: {qualname!r}"
-                )
+        def fake_nested_compile_region(fn):
+            calls.append(fn)
 
-        # After context: original forward restored
-        for m, orig_qn in zip(decoder_layers, original_qualnames):
-            fwd = getattr(m, "forward", None)
-            qualname = getattr(fwd, "__qualname__", "")
-            assert qualname == orig_qn, f"forward qualname not restored: expected {orig_qn!r}, got {qualname!r}"
+            def wrapped(*args, **kwargs):
+                return fn(*args, **kwargs) + 1
 
-    def test_noop_when_already_wrapped(self):
-        model_hf, _ = make_tiny_llama()
-        qeff_model = QEFFAutoModelForCausalLM(model_hf)
-        inner_model = qeff_model.model
+            return wrapped
 
-        decoder_layers = [m for m in inner_model.modules() if isinstance(m, QEffLlamaDecoderLayer)]
+        monkeypatch.setattr(torch.compiler, "nested_compile_region", fake_nested_compile_region)
 
-        # Enter once
-        with temporarily_enable_nested_compile_regions(inner_model, target_classes=[QEffLlamaDecoderLayer]):
-            wrapped_forwards_first = [id(m.forward) for m in decoder_layers]
+        @qeff_nested_compile_region
+        def add_one(value):
+            return value + 1
 
-            # Enter again — already wrapped, should not double-wrap
-            with temporarily_enable_nested_compile_regions(inner_model, target_classes=[QEffLlamaDecoderLayer]):
-                wrapped_forwards_second = [id(m.forward) for m in decoder_layers]
+        assert add_one(1) == 3
+        assert len(calls) == 1
 
-        # IDs may differ (second context creates a new binding), but both contexts
-        # must restore cleanly — the important invariant is no crash and final state is restored.
-        assert len(wrapped_forwards_first) == len(wrapped_forwards_second)
+    def test_decorator_falls_back_when_torch_nested_compile_region_is_unavailable(self, monkeypatch):
+        monkeypatch.delattr(torch.compiler, "nested_compile_region", raising=False)
+
+        @qeff_nested_compile_region
+        def add_one(value):
+            return value + 1
+
+        assert add_one(1) == 2
 
 
 # ---------------------------------------------------------------------------

@@ -71,6 +71,7 @@ from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 QWEN3_5_MOE_ROPE_CACHE_EXPORT_CAP = 76800
 
@@ -1086,6 +1087,7 @@ class QEffQwen3_5MoeDecoderLayer(Qwen3_5MoeDecoderLayer):
             self.self_attn.__class__ = QEffQwen3_5MoeAttention
             self.self_attn.__qeff_init__()
 
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,

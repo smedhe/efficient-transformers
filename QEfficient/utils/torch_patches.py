@@ -13,8 +13,8 @@ Patches kept here:
     legacy trace-based exporter (dynamo=False path).
   - Layerwise safe export pass patches: disable expensive ONNX exporter passes
     for layerwise prefill export (TorchScript path).
-  - temporarily_enable_nested_compile_regions / temporarily_disable_nested_compile_regions:
-    context managers for dynamo export path subgraph boundary management.
+  - qeff_nested_compile_region:
+    import-safe nested compile region decorator for dynamo subfunction export.
 
 Patches removed (upstreamed to PyTorch):
   - FunctionalTensorMode.__torch_dispatch__ tracker-entry KeyError
@@ -49,7 +49,6 @@ _original_ts_setup_trace_module_map = ts_utils._setup_trace_module_map if _ts_ut
 _original_ts_get_module_attributes = getattr(ts_utils, "_get_module_attributes", None) if _ts_utils_available else None
 
 _PATCHES_ACTIVE = False
-_MISSING_INSTANCE_ATTR = object()
 _safe_export_patch_depth = 0
 _safe_export_original_passes = {}
 _SAFE_EXPORT_REQUIRED_PASSES = {
@@ -93,6 +92,20 @@ _SAFE_EXPORT_PASS_REPLACEMENTS = {
     "_jit_pass_onnx_graph_shape_type_inference": _noop,
     "_jit_pass_onnx_deduplicate_initializers": _return_params,
 }
+
+
+def qeff_nested_compile_region(fn):
+    """Import-safe alias for ``torch.compiler.nested_compile_region``.
+
+    Older supported Torch versions do not expose ``torch.compiler.nested_compile_region``.
+    Model files can still use this decorator safely; on those versions it leaves
+    the function unchanged.
+    """
+    try:
+        from torch.compiler import nested_compile_region
+    except ImportError:
+        return fn
+    return nested_compile_region(fn)
 
 
 def _model_to_graph_patched(model, *args, **kwargs):
@@ -331,41 +344,3 @@ def undo_torch_patches():
         _C._jit_pass_onnx_track_scope_attributes = _original_track_scope_attrs
 
     _PATCHES_ACTIVE = False
-
-
-@contextmanager
-def temporarily_enable_nested_compile_regions(model, target_classes=None):
-    """
-    Wrap selected module ``forward`` methods with ``nested_compile_region``
-    during export so repeated block functions are materialized by dynamo.
-
-    Used when dynamo=True and use_onnx_subfunctions=True. Requires torch >= 2.13.
-    """
-    target_classes = tuple(target_classes) if target_classes else None
-    patched_modules = []
-
-    try:
-        for module in model.modules():
-            if target_classes and not isinstance(module, target_classes):
-                continue
-
-            bound_forward = getattr(module, "forward", None)
-            if bound_forward is None:
-                continue
-
-            wrapped_forward = getattr(bound_forward, "__func__", bound_forward)
-            if getattr(wrapped_forward, "__qualname__", "") == "mark_compile_region.<locals>.wrap.<locals>.inner":
-                continue
-
-            previous_forward = module.__dict__.get("forward", _MISSING_INSTANCE_ATTR)
-            nested_forward = torch.compiler.nested_compile_region(wrapped_forward)
-            setattr(module, "forward", nested_forward.__get__(module, type(module)))
-            patched_modules.append((module, previous_forward))
-
-        yield
-    finally:
-        for module, previous_forward in reversed(patched_modules):
-            if previous_forward is _MISSING_INSTANCE_ATTR:
-                delattr(module, "forward")
-            else:
-                setattr(module, "forward", previous_forward)

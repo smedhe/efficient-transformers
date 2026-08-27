@@ -45,6 +45,7 @@ from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 
 def qeff_prepare_mrope_cos_sin(cos, sin, position_ids):
@@ -516,6 +517,7 @@ class QEffQwen2_5_VLAttention(Qwen2_5_VLAttention):
 
 
 class QEffQwen2_5_VLDecoderLayer(Qwen2_5_VLDecoderLayer):
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,

@@ -32,6 +32,7 @@ from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 
 class GemmaRMSNormFunc(torch.autograd.Function):
@@ -282,6 +283,7 @@ class QEffGemma3Attention(Gemma3Attention):
 
 
 class QEffGemma3DecoderLayer(Gemma3DecoderLayer):
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,

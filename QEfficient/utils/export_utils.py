@@ -37,7 +37,6 @@ from QEfficient.utils.hash_utils import create_export_hash
 from QEfficient.utils.logging_utils import logger
 from QEfficient.utils.torch_patches import (
     apply_torch_patches,
-    temporarily_enable_nested_compile_regions,
     undo_torch_patches,
 )
 
@@ -276,10 +275,6 @@ def export_wrapper(func):
         if use_onnx_subfunctions:
             # Handles both Path 4 (dynamo + subfunctions) and Path 2 (TorchScript + subfunctions).
             args, kwargs, subfunction_state = _setup_onnx_subfunctions(self, args, kwargs, dynamo=dynamo)
-            if dynamo:
-                # Wrap only decoder layers (not top-level model) — wrapping top-level breaks dynamic_shapes validation.
-                target_classes = subfunction_state.get("decoder_layer_classes") or None
-                export_context = temporarily_enable_nested_compile_regions(self.model, target_classes=target_classes)
 
         # 2. Prepare export directory
         export_dir = _prepare_export_directory(self, kwargs)

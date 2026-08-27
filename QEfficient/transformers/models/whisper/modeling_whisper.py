@@ -31,6 +31,7 @@ from QEfficient.transformers.cache_utils import QEffEncoderDecoderCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils._utils import IOInfo
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE, ONNX_EXPORT_EXAMPLE_SEQ_LEN
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 
 class QEffWhisperPositionalEmbedding(WhisperPositionalEmbedding):
@@ -177,6 +178,7 @@ class QEffWhisperDecoderLayer(WhisperDecoderLayer):
     - added input_features argument to pass forward to attention
     """
 
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,

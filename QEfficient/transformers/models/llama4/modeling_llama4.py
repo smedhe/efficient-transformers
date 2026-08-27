@@ -48,6 +48,7 @@ from QEfficient.transformers.moe import (
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 
 def eager_attention_forward_vision(
@@ -552,6 +553,7 @@ class QEffLlama4TextDecoderLayer(Llama4TextDecoderLayer):
     - add new args batch idx for the CB models
     """
 
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,
