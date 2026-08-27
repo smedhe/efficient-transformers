@@ -24,6 +24,7 @@ All tests run on CPU only and are safe for parallel execution.
 Run with: pytest tests/unit_test/models/test_modeling_auto_cpu.py -n auto -v
 """
 
+import logging
 import os
 from unittest.mock import MagicMock
 
@@ -464,6 +465,35 @@ class TestQEFFAutoModelForCausalLMCompileValidation:
         qeff = QEFFAutoModelForCausalLM(model, continuous_batching=True)
         with pytest.raises((TypeError, ValueError)):
             qeff.compile(prefill_seq_len=32, ctx_len=128, prefill_only=True)
+
+    def test_compile_gptoss_prefill_only_forces_chunking(self, tmp_path, monkeypatch, caplog):
+        """gpt_oss prefill-only compile always passes enable_chunking=True downstream."""
+        model, cfg = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model)
+        qeff.model.config.model_type = "gpt_oss"
+        onnx_path = tmp_path / "model.onnx"
+        onnx_path.write_bytes(b"fake")
+        captured_kwargs = {}
+
+        def fake_compile(**kwargs):
+            captured_kwargs.update(kwargs)
+            return tmp_path / "qpc"
+
+        monkeypatch.setattr(qeff, "_compile", fake_compile)
+        caplog.set_level(logging.WARNING, logger="QEfficient")
+
+        qeff.compile(
+            onnx_path=str(onnx_path),
+            compile_dir=str(tmp_path),
+            prefill_seq_len=32,
+            ctx_len=128,
+            prefill_only=True,
+            enable_chunking=False,
+        )
+
+        assert captured_kwargs["enable_chunking"] is True
+        assert captured_kwargs["specializations"][0]["_graph_name"] == "Prefill"
+        assert "chunking is always enabled for prefill-only mode" in caplog.text
 
     def test_generate_raises_type_error_without_compile(self):
         """generate raises TypeError when QPC is not compiled."""

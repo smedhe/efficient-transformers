@@ -3705,6 +3705,20 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         """
         return self.model.config.__dict__
 
+    def _override_gptoss_prefill_chunking(
+        self, prefill_only: Optional[bool], enable_chunking: Optional[bool]
+    ) -> Optional[bool]:
+        if (
+            prefill_only is True
+            and enable_chunking is False
+            and getattr(self.model.config, "model_type", None) == "gpt_oss"
+        ):
+            logger.warning(
+                "For gpt_oss, chunking is always enabled for prefill-only mode; overriding enable_chunking=True."
+            )
+            return True
+        return enable_chunking
+
     def get_seq_len_and_handle_specialized_prefill_model(
         self,
         prefill_seq_len: Optional[int] = None,
@@ -3841,6 +3855,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 "decode_only=True is not supported by QEFFAutoModelForCausalLM.export(). "
                 "Use the default non-prefill export path for standard CausalLM decode graphs."
             )
+        enable_chunking = self._override_gptoss_prefill_chunking(prefill_only, kwargs.get("enable_chunking", False))
+        kwargs["enable_chunking"] = enable_chunking
 
         if layerwise:
             return self._run_layerwise(
@@ -3878,7 +3894,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             kv_cache_shape[1 if len(kv_cache_shape) == 3 else 2] = max(
                 2, kv_cache_shape[1 if len(kv_cache_shape) == 3 else 2]
             )
-        enable_chunking = kwargs.get("enable_chunking", False)
         if (
             kwargs.get("retain_full_kv", False)
             and self.model.config.model_type not in SPECIALIZED_DISAGG_SERVING_MODEL_ARCH
@@ -4382,6 +4397,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             If `prefill_seq_len` is less than `num_speculative_tokens + 1` for TLM models.
 
         """
+        enable_chunking = self._override_gptoss_prefill_chunking(prefill_only, enable_chunking)
         if layerwise:
             return self._run_layerwise(
                 final_compile=True,
