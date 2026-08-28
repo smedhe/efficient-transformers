@@ -18,9 +18,9 @@ def main():
     parser.add_argument("--prompt", type=str, default="Hello", help="Input prompt")
     parser.add_argument("--prefill-seq-len", type=int, default=1, help="Prefill sequence length")
     parser.add_argument(
-        "--ctx-len", type=int, default=131072, help="Context length high enough to force blocking computation"
+        "--ctx-len", type=int, default=256, help="Context length high enough to force blocking computation"
     )
-    parser.add_argument("--generation-len", type=int, default=64000, help="Number of tokens to generate")
+    parser.add_argument("--generation-len", type=int, default=256, help="Number of tokens to generate")
     parser.add_argument("--num-cores", type=int, default=16, help="Number of cores")
     parser.add_argument(
         "--device-group",
@@ -67,7 +67,7 @@ def main():
         print(f"Generated: {exec_info.generated_texts[0]}")
 
     # setup qaic config to enable blocking, ensure 4 or more device ids are passed
-    qaic_config = {"blocking_mode": args.blocking_mode}
+    qaic_config = {"blocking_mode": args.blocking_mode, "num_kv_blocks": 2}
     model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2)
 
     # Compile the model
@@ -75,10 +75,11 @@ def main():
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,
-        num_devices=8,
+        num_devices=4,
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
+        dynamo=True,
         qaic_config=qaic_config,
         user_tiled=True,
     )

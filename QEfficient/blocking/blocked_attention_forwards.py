@@ -81,7 +81,7 @@ def update_running_softmax(
         )
     output_updated = output_updated.to(prev_output.dtype)
 
-    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()) or torch._dynamo.is_compiling():
+    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
         current_max = torch.where(skip_future, prev_max, current_max_updated)
         current_denominator = torch.where(skip_future, prev_denominator, current_denominator_updated)
         output = torch.where(skip_future.unsqueeze(-1), prev_output, output_updated)
@@ -111,7 +111,7 @@ def update_running_softmax_prefill(
     current_denominator_updated = prev_denominator * torch.exp(delta_max) + curr_exp_sum
     prev_output = output
     output_updated = prev_output * torch.exp(delta_max.unsqueeze(-1)) + torch.matmul(current_exp, v_block)
-    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()) or torch._dynamo.is_compiling():
+    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
         assert skip_future is not None
         current_max = torch.where(skip_future, prev_max, current_max_updated)
         current_denominator = torch.where(skip_future, prev_denominator, current_denominator_updated)
@@ -158,8 +158,9 @@ def blocked_kv_attention_forward(
         (batch_size, num_heads, seq_len),
         float(MIN_MASKED_ATTENTION_VALUE),
         device=query.device,
+        dtype=query.dtype,
     )
-    current_denominator = torch.zeros(batch_size, num_heads, seq_len, device=query.device)
+    current_denominator = torch.zeros(batch_size, num_heads, seq_len, device=query.device, dtype=query.dtype)
 
     if torch.onnx.is_in_onnx_export():
         attention_mask = None
@@ -173,7 +174,6 @@ def blocked_kv_attention_forward(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
     current_position = position_ids.max(dim=-1).values
     # needed for GPT-OSS
     if sinks is not None:
@@ -227,6 +227,9 @@ def blocked_kv_attention_forward(
                 mask_block = mask_block.to(torch.bool) | causal_mask_block
 
         if mask_block is not None:
+            masked_tensor = torch.full_like(
+                attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device
+            )
             attn_weights_block = torch.where(mask_block, masked_tensor, attn_weights_block)
 
         current_max, current_denominator, output = update_running_softmax(
@@ -572,7 +575,6 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
             + torch.arange(T_h_nom, device=query.device)[None, :]
         ).repeat(num_kv_heads, 1)  # [num_kv_heads*split, T_h_nom]
         is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
-        masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=query.dtype, device=query.device)
 
         accs = []
         for r_start, r_end in r_ranges:
@@ -640,6 +642,9 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
                 # causal_mask_block: [B, num_kv_heads*split, tc, split_block_len] → expand to [B, num_kv_heads*split, rc*tc, split_block_len]
                 causal_rc = causal_mask_block.repeat(1, 1, rc, 1) if rc > 1 else causal_mask_block
                 attn_weights_block = torch.matmul(acc["query"], K_4d.transpose(-1, -2)) * scaling
+                masked_tensor = torch.full_like(
+                    attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=query.dtype, device=query.device
+                )
                 attn_weights_block = torch.where(causal_rc, masked_tensor, attn_weights_block)
                 acc["m_acc"], acc["s_acc"], acc["o_acc"] = update_running_softmax(
                     acc["m_acc"],
@@ -976,7 +981,6 @@ def blocked_q_attention_forward_prefill(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
 
     q_block_starts = [-(-i * q_len) // num_q_blocks for i in range(num_q_blocks)]
     q_output_blocks = []
@@ -1000,6 +1004,7 @@ def blocked_q_attention_forward_prefill(
             sliding_window=sliding_window,
             start_index=0,
         )
+        masked_tensor = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
         attn_weights = torch.where(causal_mask, masked_tensor, attn_weights)
 
         if sinks is not None:
@@ -1068,7 +1073,6 @@ def blocked_qkv_attention_forward(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
     current_position = position_ids.max(dim=-1).values
     # needed for GPT-OSS
     if sinks is not None:
@@ -1087,8 +1091,9 @@ def blocked_qkv_attention_forward(
             (batch_size, num_heads, q_len_block),
             float(MIN_MASKED_ATTENTION_VALUE),
             device=query.device,
+            dtype=query.dtype,
         )
-        current_denominator = torch.zeros(batch_size, num_heads, q_len_block, device=query.device)
+        current_denominator = torch.zeros(batch_size, num_heads, q_len_block, device=query.device, dtype=query.dtype)
         output_blocks = torch.zeros((batch_size, num_heads, q_len_block, DH), device=query.device, dtype=query.dtype)
 
         for j in range(num_kv_blocks):
@@ -1145,6 +1150,9 @@ def blocked_qkv_attention_forward(
 
             if mask_block is not None:
                 attn_mask_block = mask_block[:, :, q_start : q_start + q_len_block, :]
+                masked_tensor = torch.full_like(
+                    attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device
+                )
                 attn_weights_block = torch.where(attn_mask_block, masked_tensor, attn_weights_block)
 
             current_max, current_denominator, output_blocks = update_running_softmax(
@@ -1215,7 +1223,6 @@ def blocked_hqkv_attention_forward(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
     current_position = position_ids.max(dim=-1).values
     # needed for GPT-OSS
     if sinks is not None:
@@ -1245,8 +1252,11 @@ def blocked_hqkv_attention_forward(
                 (batch_size, h_end - h_start, q_len_block),
                 float(MIN_MASKED_ATTENTION_VALUE),
                 device=query.device,
+                dtype=query.dtype,
             )
-            current_denominator = torch.zeros(batch_size, h_end - h_start, q_len_block, device=query.device)
+            current_denominator = torch.zeros(
+                batch_size, h_end - h_start, q_len_block, device=query.device, dtype=query.dtype
+            )
             output_blocks = torch.zeros(
                 (batch_size, h_end - h_start, q_len_block, DH), device=query.device, dtype=query.dtype
             )
@@ -1308,6 +1318,9 @@ def blocked_hqkv_attention_forward(
 
                 if mask_block is not None:
                     mask_block_g = mask_block[:, :, q_start : q_start + q_len_block, :]
+                    masked_tensor = torch.full_like(
+                        attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device
+                    )
                     attn_weights_block = torch.where(mask_block_g, masked_tensor, attn_weights_block)
 
                 current_max, current_denominator, output_blocks = update_running_softmax(
@@ -1386,7 +1399,6 @@ def blocked_bhqkv_attention_forward(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
 
     current_position = position_ids.max(dim=-1).values
     # needed for GPT-OSS
@@ -1429,8 +1441,11 @@ def blocked_bhqkv_attention_forward(
                     (batch_len, h_end - h_start, q_len_block),
                     float(MIN_MASKED_ATTENTION_VALUE),
                     device=query.device,
+                    dtype=query.dtype,
                 )
-                current_denominator = torch.zeros(batch_len, h_end - h_start, q_len_block, device=query.device)
+                current_denominator = torch.zeros(
+                    batch_len, h_end - h_start, q_len_block, device=query.device, dtype=query.dtype
+                )
                 output_blocks = torch.zeros(
                     (batch_len, h_end - h_start, q_len_block, DH), device=query.device, dtype=query.dtype
                 )
@@ -1496,6 +1511,9 @@ def blocked_bhqkv_attention_forward(
                         mask_block_g = mask_block[
                             batch_start : batch_start + batch_len, :, q_start : q_start + q_len_block, :
                         ]
+                        masked_tensor = torch.full_like(
+                            attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device
+                        )
                         attn_weights_block = torch.where(mask_block_g, masked_tensor, attn_weights_block)
 
                     current_max, current_denominator, output_blocks = update_running_softmax(
@@ -1552,7 +1570,6 @@ def blocked_h_attention_forward(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
 
     # Process each head block independently
     for head_block_idx in range(num_head_blocks):
@@ -1570,6 +1587,9 @@ def blocked_h_attention_forward(
         if position_bias is not None:
             attn_weights = attn_weights + position_bias[h_start:h_end, :, :]
         if attention_mask is not None:
+            masked_tensor = torch.full_like(
+                attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device
+            )
             attn_weights = torch.where(attention_mask, masked_tensor, attn_weights)
         # attention sinks needed for gpt-oss
         if sinks is not None:
@@ -1623,7 +1643,6 @@ def blocked_q_attention_forward(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
 
     for q_block_idx in range(num_q_blocks):
         q_start = q_block_positions[q_block_idx]
@@ -1642,6 +1661,9 @@ def blocked_q_attention_forward(
         if position_bias is not None:
             attn_weights = attn_weights + position_bias
         if attn_mask_block is not None:
+            masked_tensor = torch.full_like(
+                attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device
+            )
             attn_weights = torch.where(attn_mask_block, masked_tensor, attn_weights)
         # attention sinks needed for gpt-oss
         if sinks is not None:
@@ -1693,7 +1715,6 @@ def blocked_kv_mla_attention_forward(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = query.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
 
     # Initialize Running Maximum and Denominator
     current_max = torch.full(
@@ -1763,6 +1784,9 @@ def blocked_kv_mla_attention_forward(
             krope_nope = torch.cat((compressed_kv_block, k_pe_block), dim=-1)
             attn_weights_block = torch.matmul(query, krope_nope.transpose(2, 3)) * scaling
             # [1, 64, q_len, 576] X [1, 1, 576, kv_block_size] -> [1, 64, q_len, kv_block_size]
+            masked_tensor = torch.full_like(
+                attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device
+            )
             attn_weights_block = torch.where(causal_mask_block, masked_tensor, attn_weights_block)
             current_max, current_denominator, output = update_running_softmax(
                 current_max,
@@ -1783,6 +1807,9 @@ def blocked_kv_mla_attention_forward(
                 )
             krope_nope = torch.cat((knope, k_pe_block), dim=-1)
             attn_weights_block = torch.matmul(query, krope_nope.transpose(2, 3)) * scaling
+            masked_tensor = torch.full_like(
+                attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device
+            )
             attn_weights_block = torch.where(causal_mask_block, masked_tensor, attn_weights_block)
             current_max, current_denominator, output = update_running_softmax(
                 current_max,
@@ -1834,7 +1861,6 @@ def blocked_h_mla_attention_forward(
         mask_dtype = module.config.dtype
     else:
         mask_dtype = q_pe.dtype
-    masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=q_pe.device)
 
     if mla_absorption is not None:
         absorption = mla_absorption.get("absorption", False)
@@ -1865,6 +1891,9 @@ def blocked_h_mla_attention_forward(
             attn_weights = torch.matmul(qrope_nope, krope_nope.transpose(2, 3)) * scaling
 
         if attention_mask is not None:
+            masked_tensor = torch.full_like(
+                attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=q_pe.device
+            )
             attn_weights = torch.where(attention_mask, masked_tensor, attn_weights)
         attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q_pe.dtype)
         attn_output = torch.matmul(attn_weights, kva)

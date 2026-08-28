@@ -292,3 +292,28 @@ class TestPruneFakeInitializersTransform:
         changed = PruneFakeInitializersTransform.apply(program)
         assert not changed
         assert "real_weight" in program.model.graph.initializers
+
+
+def test_ctx_scatter_gather_dynamo_translation_table_complete():
+    from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
+
+    required_ctx_ops = {
+        "ctx_scatter": torch.ops.qefficient.ctx_scatter.default,
+        "ctx_scatter_3d": torch.ops.qefficient.ctx_scatter_3d.default,
+        "ctx_scatter_3d_generalized": torch.ops.qefficient.ctx_scatter_3d_generalized.default,
+        "ctx_scatter_3d_int": torch.ops.qefficient.ctx_scatter_3d_int.default,
+        "ctx_scatter_cb": torch.ops.qefficient.ctx_scatter_cb.default,
+        "ctx_scatter_cb_3d": torch.ops.qefficient.ctx_scatter_cb_3d.default,
+        "ctx_chunk_scatter_batch": torch.ops.qefficient.ctx_chunk_scatter_batch.default,
+        "ctx_gather": torch.ops.qefficient.ctx_gather.default,
+        "ctx_gather_3d": torch.ops.qefficient.ctx_gather_3d.default,
+        "ctx_gather_3d_generalized": torch.ops.qefficient.ctx_gather_3d_generalized.default,
+        "ctx_gather_cb": torch.ops.qefficient.ctx_gather_cb.default,
+        "ctx_gather_cb_3d": torch.ops.qefficient.ctx_gather_cb_3d.default,
+        "ctx_gather_blocked_kv": torch.ops.qefficient.ctx_gather_blocked_kv.default,
+        "ctx_gather_blocked_kv_cb": torch.ops.qefficient.ctx_gather_blocked_kv_cb.default,
+        "ctx_gather_blocked_kv_batch": torch.ops.qefficient.ctx_gather_blocked_kv_batch.default,
+    }
+
+    missing = [name for name, op in required_ctx_ops.items() if op not in DYNAMO_CUSTOM_OP_TABLE]
+    assert not missing
