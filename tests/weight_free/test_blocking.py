@@ -23,6 +23,10 @@ from ._helpers import (
     skip_on_model_fetch_error,
 )
 
+pytestmark = pytest.mark.skip(
+    reason="Legacy broad blocking matrix is superseded by tests/weight_free/test_blocking_tiny_models.py"
+)
+
 # Only include architectures whose forward path consumes attn_blocking_config.
 _BLOCKING_SUPPORTED_TYPES = {
     "gemma",
@@ -135,7 +139,6 @@ def test_weight_free_blocking_compile_and_generate(model_type, model_id, blockin
         use_weight_free_export=True,
         use_onnx_subfunctions=True,
     )
-
     if is_multi_device:
         assert compile_dir.is_dir()
         return
@@ -196,7 +199,6 @@ def test_weight_free_cb_blocking_compile_and_generate(model_type, model_id, bloc
         use_weight_free_export=True,
         use_onnx_subfunctions=True,
     )
-
     if is_multi_device:
         assert compile_dir.is_dir()
         return

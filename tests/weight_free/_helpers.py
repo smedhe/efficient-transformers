@@ -15,6 +15,7 @@ both suites exercise the same model families.
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -281,6 +282,54 @@ def assert_has_subfunctions(onnx_path: Path, qeff_model: QEFFAutoModelForCausalL
     assert found, (
         f"Expected decoder-block subfunctions ({decoder_names}) in {onnx_path.name} but found none. "
         f"Functions present: {[fn.name for fn in model.functions]}"
+    )
+
+
+_BLOCKED_KV_MARKER_MODES = {"kv", "qkv", "hkv", "hqkv", "bhqkv", "kv_headpar", "kv_batch_fold"}
+
+
+def assert_blocked_kv_ops_for_mode(
+    onnx_path: Path,
+    qeff_model: QEFFAutoModelForCausalLM,
+    blocking_key: str,
+    *,
+    continuous_batching: bool = False,
+) -> None:
+    """Assert stable blocked-KV custom op markers for KV-bearing blocking modes.
+
+    Pure Q/H/HQ modes do not have a small reliable graph marker, so they are
+    covered by dispatch tests plus export/compile/generation parity.
+    """
+    if blocking_key not in _BLOCKED_KV_MARKER_MODES:
+        return
+
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    get_submodules = getattr(qeff_model.model, "get_submodules_for_export", None)
+    decoder_names = set()
+    if callable(get_submodules):
+        submodule_classes = get_submodules()
+        decoder_names = {
+            cls.__name__
+            for cls in (submodule_classes if isinstance(submodule_classes, (set, list, tuple)) else [submodule_classes])
+        }
+
+    function_nodes = [
+        node
+        for fn in model.functions
+        if not decoder_names or any(decoder_name in fn.name for decoder_name in decoder_names)
+        for node in fn.node
+    ]
+    op_counts = Counter(node.op_type for node in list(model.graph.node) + function_nodes)
+
+    expected_ops = {"CtxGatherBlockedKV", "CtxGatherBlockedKVBatch"}
+    if continuous_batching:
+        expected_ops.add("CtxGatherBlockedKVCB")
+
+    found_ops = {op_name: op_counts[op_name] for op_name in sorted(expected_ops) if op_counts[op_name]}
+    assert found_ops, (
+        f"Expected blocked KV custom op marker for mode '{blocking_key}' in {onnx_path.name}, "
+        f"but none of {sorted(expected_ops)} were present. "
+        f"Ops present: {dict(op_counts)}"
     )
 
 
