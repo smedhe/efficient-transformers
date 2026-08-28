@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from QEfficient.utils.device_utils import get_available_device_id
+from QEfficient.utils.device_utils import get_available_device_id, is_multi_qranium_setup_available
 
 
 def _parse_torch_version() -> tuple:
@@ -35,6 +35,10 @@ def _parse_torch_version() -> tuple:
 def pytest_configure(config):
     config.addinivalue_line("markers", "weight_free: mark a test as part of the weight-free export test suite")
     config.addinivalue_line("markers", "weight_free_export: CPU-only weight-free export smoke and parity tests")
+    config.addinivalue_line(
+        "markers",
+        "weight_free_multi_device: weight-free multi-device (MDP) compile tests require MDP-capable QAIC setup",
+    )
 
 
 _XFAIL_MODELS = {"gpt_oss"}
@@ -87,3 +91,11 @@ def skip_if_no_qaic_device(request):
     if request.node.get_closest_marker("on_qaic"):
         if get_available_device_id() is None:
             pytest.skip("No available QAIC device")
+
+
+@pytest.fixture(autouse=True)
+def skip_if_no_mdp_setup(request):
+    """Auto-skip multi-device tests when the hardware doesn't have MDP-capable devices."""
+    if request.node.get_closest_marker("weight_free_multi_device"):
+        if not is_multi_qranium_setup_available():
+            pytest.skip("No MDP-capable QAIC device setup available (requires HybridBoot+ MDP+)")

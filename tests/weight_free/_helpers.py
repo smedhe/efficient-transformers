@@ -32,6 +32,11 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 # Worker-level model cache
 # ---------------------------------------------------------------------------
 _HF_MODEL_CACHE: Dict[str, Tuple[AutoModelForCausalLM, AutoTokenizer]] = {}
+_HF_TOKEN_CACHE: Dict[Tuple[str, str, Tuple[str, ...], int, int, int, int | None], object] = {}
+
+# Export cache shared by QAIC weight-free tests. The key only includes export-time
+# knobs; compile-time options still get their own QPCs per test.
+_WEIGHT_FREE_ONNX_CACHE: Dict[Tuple[str, int, bool, bool], Tuple[str, "QEFFAutoModelForCausalLM"]] = {}
 
 # ---------------------------------------------------------------------------
 # Model registry — same tiny-random models as tests/dynamo/
@@ -39,6 +44,7 @@ _HF_MODEL_CACHE: Dict[str, Tuple[AutoModelForCausalLM, AutoTokenizer]] = {}
 
 WEIGHT_FREE_CAUSAL_LM_MODEL_IDS = {
     "codegen": "hf-internal-testing/tiny-random-CodeGenForCausalLM",
+    # deepseek_v3 needs a newer compatible transformers environment.
     "falcon": "hf-internal-testing/tiny-random-FalconForCausalLM",
     "gemma": "Xenova/tiny-random-GemmaForCausalLM",
     "gemma2": "hf-internal-testing/tiny-random-Gemma2ForCausalLM",
@@ -47,14 +53,17 @@ WEIGHT_FREE_CAUSAL_LM_MODEL_IDS = {
     "gpt_bigcode": "hf-internal-testing/tiny-random-GPTBigCodeForCausalLM",
     "gpt_oss": "tiny-random/gpt-oss-mxfp4",
     "gptj": "hf-internal-testing/tiny-random-GPTJForCausalLM",
-    "granite": "hf-internal-testing/tiny-random-GraniteForCausalLM",
-    "granitemoe": "ibm-granite/granite-3.1-1b-a400m-instruct",
+    "granite": "hf-tiny-v2/tiny-random-GraniteForCausalLM",
+    "granitemoe": "hf-tiny-v2/tiny-random-GraniteMoeForCausalLM",
+    # grok_1 tiny config is not supported in legacy.
     "llama": "hf-internal-testing/tiny-random-LlamaForCausalLM",
+    # llama_swiftkv is not AutoModelForCausalLM-compatible.
     "mistral": "hf-internal-testing/tiny-random-MistralForCausalLM",
     "mixtral": "hf-internal-testing/tiny-random-MixtralForCausalLM",
     "mpt": "hf-internal-testing/tiny-random-MptForCausalLM",
     "olmo2": "hf-internal-testing/tiny-random-Olmo2ForCausalLM",
     "phi": "hf-internal-testing/tiny-random-PhiForCausalLM",
+    # phi3 is disabled until SplitToSequence is fixed.
     "qwen2": "yujiepan/qwen2-tiny-random",
     "qwen3": "tiny-random/qwen3",
     "qwen3_moe": "tiny-random/qwen3-moe",
@@ -68,6 +77,7 @@ WEIGHT_FREE_CAUSAL_LM_MODEL_IDS = {
 PROMPT_LEN = 8
 CTX_LEN = 16
 BATCH_SIZE = 1
+FULL_BATCH_SIZE = 4
 MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False, "torch_dtype": torch.float32}
 
 # ---------------------------------------------------------------------------
@@ -102,6 +112,143 @@ def load_tokenizer(model_id: str) -> AutoTokenizer:
         load_hf_model(model_id)
     _, tokenizer = _HF_MODEL_CACHE[model_id]
     return tokenizer
+
+
+def _hf_token_cache_key(tokenizer, model_hf, prompts, prompt_len, ctx_len, batch_size, full_batch_size):
+    model_name = getattr(model_hf.config, "_name_or_path", "") or getattr(model_hf.config, "name_or_path", "")
+    tokenizer_name = getattr(tokenizer, "name_or_path", "")
+    return (
+        model_name,
+        tokenizer_name,
+        tuple(prompts),
+        prompt_len,
+        ctx_len,
+        batch_size,
+        full_batch_size,
+    )
+
+
+def get_hf_tokens(
+    tokenizer,
+    model_hf,
+    prompts,
+    *,
+    prompt_len: int,
+    ctx_len: int,
+    batch_size: int = BATCH_SIZE,
+    full_batch_size: int | None = None,
+):
+    from QEfficient.utils.run_utils import ApiRunner
+
+    key = _hf_token_cache_key(tokenizer, model_hf, prompts, prompt_len, ctx_len, batch_size, full_batch_size)
+    if key in _HF_TOKEN_CACHE:
+        return copy.deepcopy(_HF_TOKEN_CACHE[key])
+
+    api_runner = ApiRunner(
+        batch_size=batch_size,
+        tokenizer=tokenizer,
+        config=model_hf.config,
+        prompt=prompts,
+        prompt_len=prompt_len,
+        ctx_len=ctx_len,
+        full_batch_size=full_batch_size,
+    )
+    if full_batch_size is None:
+        hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
+        assert hf_tokens is not None, "HF PT inference returned None"
+        _HF_TOKEN_CACHE[key] = copy.deepcopy(hf_tokens)
+        return copy.deepcopy(hf_tokens)
+
+    hf_tokens = api_runner.run_hf_model_on_pytorch_CB(model_hf)
+    assert hf_tokens is not None, "HF PT CB inference returned None"
+    _HF_TOKEN_CACHE[key] = copy.deepcopy(hf_tokens)
+    return copy.deepcopy(hf_tokens)
+
+
+def assert_hf_hw_parity(
+    model_id: str,
+    hf_tokens,
+    qaic_output,
+    *,
+    gen_len: int,
+    full_batch_size: int | None = None,
+    context: str = "",
+) -> None:
+    assert qaic_output is not None, "QAIC generate returned None"
+    assert hasattr(qaic_output, "generated_ids"), "QAIC generate did not return generated_ids"
+    assert qaic_output.generated_ids is not None, "QAIC generate returned generated_ids=None"
+
+    label = f" {context}" if context else ""
+    if full_batch_size is None:
+        qaic_tokens = qaic_output.generated_ids[0].flatten()[:gen_len]
+        if not np.array_equal(hf_tokens, qaic_tokens):
+            assert False, (
+                f"HF AIC HW{label} parity failed for {model_id}: HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"
+            )
+        return
+
+    assert len(hf_tokens) == full_batch_size
+    for batch_idx in range(full_batch_size):
+        hf_batch_tokens = np.asarray(hf_tokens[batch_idx]).flatten()[:gen_len]
+        qaic_batch_tokens = qaic_output.generated_ids[batch_idx].flatten()[:gen_len]
+        if not np.array_equal(hf_batch_tokens, qaic_batch_tokens):
+            assert False, (
+                f"HF AIC HW{label} CB parity failed for {model_id} batch {batch_idx}: "
+                f"HF={hf_batch_tokens.tolist()}, QAIC={qaic_batch_tokens.tolist()}"
+            )
+
+
+def get_weight_free_export(
+    model_id: str,
+    tmp_path_factory,
+    *,
+    num_hidden_layers: int = 2,
+    continuous_batching: bool = False,
+    qaic_config: dict | None = None,
+) -> Tuple[str, QEFFAutoModelForCausalLM]:
+    """Export once per compatible weight-free graph shape and cache the ONNX path."""
+    key = (model_id, num_hidden_layers, continuous_batching, bool(qaic_config))
+    if key in _WEIGHT_FREE_ONNX_CACHE:
+        return _WEIGHT_FREE_ONNX_CACHE[key]
+
+    kwargs: Dict[str, object] = {}
+    if continuous_batching:
+        kwargs["continuous_batching"] = True
+    if qaic_config:
+        kwargs["qaic_config"] = qaic_config
+
+    qeff_model = build_meta_qeff_model(model_id, num_hidden_layers=num_hidden_layers, **kwargs)
+
+    export_dir = tmp_path_factory.mktemp("weight_free_export", numbered=True)
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            export_dir,
+            use_weight_free_export=True,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+        )
+    )
+    _WEIGHT_FREE_ONNX_CACHE[key] = (str(onnx_path), qeff_model)
+    return _WEIGHT_FREE_ONNX_CACHE[key]
+
+
+def build_meta_qeff_model(model_id: str, num_hidden_layers: int = 2, **qeff_kwargs) -> QEFFAutoModelForCausalLM:
+    """Build a meta-device QEff model from config — no weights loaded into memory.
+
+    This is the correct pattern for weight-free export: the model is traced on the
+    meta device (shapes only, no data), and pretrained_model_name_or_path tells the
+    export where to find the real weights for weight_spec.json.
+
+    num_hidden_layers limits the layer count so tests run quickly, matching the
+    --layers flag used by the weight-free example scripts.
+    Extra kwargs (e.g. continuous_batching=True) are forwarded to QEFFAutoModelForCausalLM.
+    """
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    config.num_hidden_layers = num_hidden_layers
+    config.torch_dtype = torch.float32
+    with init_empty_weights():
+        meta_model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
+    return QEFFAutoModelForCausalLM(meta_model, pretrained_model_name_or_path=model_id, **qeff_kwargs)
 
 
 def exported_onnx_path(export_result) -> Path:

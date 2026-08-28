@@ -27,7 +27,7 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.run_utils import ApiRunner
 
-from ._helpers import (
+from .._helpers import (
     BATCH_SIZE,
     CTX_LEN,
     PROMPT_LEN,

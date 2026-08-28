@@ -19,7 +19,7 @@ from transformers import AutoConfig
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
-from ._helpers import (
+from .._helpers import (
     WEIGHT_FREE_CAUSAL_LM_MODEL_IDS,
     assert_has_subfunctions,
     assert_retained_state_outputs,
