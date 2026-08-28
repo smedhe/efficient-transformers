@@ -13,11 +13,11 @@ import torch
 from transformers.cache_utils import Cache, CacheLayerMixin, EncoderDecoderCache
 
 from QEfficient.customop import (
-    CtxChunkScatterBatchFunc,
-    CtxGatherFuncBlockedKVBatch,
+    ctx_chunk_scatter_batch,
     ctx_gather,
     ctx_gather_3d,
     ctx_gather_blocked_kv,
+    ctx_gather_blocked_kv_batch,
     ctx_gather_blocked_kv_cb,
     ctx_gather_cb,
     ctx_gather_cb_3d,
@@ -313,7 +313,7 @@ class QEffDynamicLayer(CacheLayerMixin):
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
 
         ctx_indices = ctx_indices.expand(1, cache_bh, T_block)
-        k_out = CtxGatherFuncBlockedKVBatch.apply(k_out, ctx_indices)
+        k_out = ctx_gather_blocked_kv_batch(k_out, ctx_indices)
 
         return k_out
 
@@ -395,7 +395,7 @@ class QEffDynamicLayer(CacheLayerMixin):
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
 
         ctx_indices = ctx_indices.expand(1, cache_bh, T_block)
-        v_out = CtxGatherFuncBlockedKVBatch.apply(v_out, ctx_indices)
+        v_out = ctx_gather_blocked_kv_batch(v_out, ctx_indices)
 
         v_out = torch.where(invalid_mask.unsqueeze(-1), torch.zeros_like(v_out, dtype=v_out.dtype), v_out)
         return v_out
@@ -508,8 +508,8 @@ class QEffDynamicLayer(CacheLayerMixin):
             keys_folded = self.keys.reshape(1, cache_bh, ctx_len, head_dim)
             values_folded = self.values.reshape(1, cache_bh, ctx_len, head_dim)
 
-            keys_folded = CtxChunkScatterBatchFunc.apply(keys_folded, position_ids, key_states)
-            values_folded = CtxChunkScatterBatchFunc.apply(values_folded, position_ids, value_states)
+            keys_folded = ctx_chunk_scatter_batch(keys_folded, position_ids, key_states)
+            values_folded = ctx_chunk_scatter_batch(values_folded, position_ids, value_states)
 
             self.keys = keys_folded.reshape(full_batch_size, Hkv, ctx_len, head_dim)
             self.values = values_folded.reshape(full_batch_size, Hkv, ctx_len, head_dim)
