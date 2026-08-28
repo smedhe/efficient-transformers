@@ -81,7 +81,7 @@ def update_running_softmax(
         )
     output_updated = output_updated.to(prev_output.dtype)
 
-    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()) or torch._dynamo.is_compiling():
         current_max = torch.where(skip_future, prev_max, current_max_updated)
         current_denominator = torch.where(skip_future, prev_denominator, current_denominator_updated)
         output = torch.where(skip_future.unsqueeze(-1), prev_output, output_updated)
@@ -111,7 +111,7 @@ def update_running_softmax_prefill(
     current_denominator_updated = prev_denominator * torch.exp(delta_max) + curr_exp_sum
     prev_output = output
     output_updated = prev_output * torch.exp(delta_max.unsqueeze(-1)) + torch.matmul(current_exp, v_block)
-    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()) or torch._dynamo.is_compiling():
         assert skip_future is not None
         current_max = torch.where(skip_future, prev_max, current_max_updated)
         current_denominator = torch.where(skip_future, prev_denominator, current_denominator_updated)
@@ -170,7 +170,7 @@ def blocked_kv_attention_forward(
     num_kv_blocks = max(1, num_kv_blocks)
     kv_block_size = -(-ctx_len // num_kv_blocks)
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
@@ -191,7 +191,7 @@ def blocked_kv_attention_forward(
         if skip_kv:
             skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
             # Eager mode Only
-            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
 
@@ -296,7 +296,7 @@ def blocked_kv_attention_forward_decode_headpar_batch(
         skip_future = None
         if skip_kv:
             skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
-            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
 
@@ -325,7 +325,7 @@ def blocked_kv_attention_forward_decode_headpar_batch(
 
         max_block = attn_weights_block.max(dim=3).values
         exp_block = torch.exp(attn_weights_block - max_block.unsqueeze(-1))
-        if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+        if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             max_block = torch.where(skip_future, torch.full_like(max_block, MIN_MASKED_ATTENTION_VALUE), max_block)
             exp_block = torch.where(skip_future, torch.zeros_like(exp_block), exp_block)
 
@@ -335,7 +335,7 @@ def blocked_kv_attention_forward_decode_headpar_batch(
         )
         sum_block = torch.einsum("btdn->btd", exp_block)
         out_block = torch.matmul(exp_block, v_block)
-        if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+        if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             sum_block = torch.where(skip_future, torch.zeros_like(sum_block), sum_block)
             out_block = torch.where(skip_future, torch.zeros_like(out_block), out_block)
         max_blocks.append(max_block)
@@ -410,7 +410,7 @@ def blocked_kv_attention_forward_headpar_offline(
         if skip_kv:
             skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
             # Eager mode Only
-            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
 
@@ -458,7 +458,7 @@ def blocked_kv_attention_forward_headpar_offline(
 
         max_block = attn_weights_block.max(dim=-1).values
         exp_block = torch.exp(attn_weights_block - max_block.unsqueeze(-1))
-        if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+        if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             max_block = torch.where(skip_future, torch.full_like(max_block, HEADPAR_MASKED_ATTENTION_VALUE), max_block)
             exp_block = torch.where(skip_future, torch.zeros_like(exp_block), exp_block)
 
@@ -468,7 +468,7 @@ def blocked_kv_attention_forward_headpar_offline(
         value_5d = v_block.view(batch_size, num_kv_heads, split, split_block_len, head_dim)
         sum_block = torch.einsum("bsgkn->bsgk", exp_block)
         out_block = torch.matmul(exp_block, value_5d)
-        if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+        if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             sum_block = torch.where(skip_future, torch.zeros_like(sum_block), sum_block)
             out_block = torch.where(skip_future, torch.zeros_like(out_block), out_block)
 
@@ -571,7 +571,7 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
             torch.arange(split, device=query.device)[:, None] * T_h_nom
             + torch.arange(T_h_nom, device=query.device)[None, :]
         ).repeat(num_kv_heads, 1)  # [num_kv_heads*split, T_h_nom]
-        is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()
+        is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
         masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=query.dtype, device=query.device)
 
         accs = []
@@ -704,7 +704,7 @@ def blocked_qkv_attention_forward_prefill_online(
     )
 
     q_fold = query.reshape(B, num_cores, n_rep_per_core, QL, D)
-    is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()
+    is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
 
     t_chunks = []
     for t_start in range(0, QL, ql_chunk):
@@ -834,7 +834,7 @@ def blocked_kv_attention_forward_prefill_headpar_offline(
         skip_future = None
         if skip_kv:
             skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
-            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
 
@@ -889,14 +889,14 @@ def blocked_kv_attention_forward_prefill_headpar_offline(
             m_c = attn_c.max(dim=-1).values  # [B, Hkv, split, chunk, QL]
             exp_c = torch.exp(attn_c - m_c.unsqueeze(-1))
 
-            if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+            if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
                 m_c = torch.where(skip_future, torch.full_like(m_c, float(MIN_MASKED_ATTENTION_VALUE)), m_c)
                 exp_c = torch.where(skip_future, torch.zeros_like(exp_c), exp_c)
 
             sum_c = torch.einsum("bhsrqt->bhsrq", exp_c)
             out_c = torch.matmul(exp_c, V_5d.unsqueeze(3))  # [B, Hkv, split, chunk, QL, kv_lora_rank]
 
-            if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+            if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
                 sum_c = torch.where(skip_future, torch.zeros_like(sum_c), sum_c)
                 out_c = torch.where(skip_future, torch.zeros_like(out_c), out_c)
 
@@ -973,7 +973,7 @@ def blocked_q_attention_forward_prefill(
     position_ids = cache_kwargs.get("position_ids")
 
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
@@ -1065,7 +1065,7 @@ def blocked_qkv_attention_forward(
     q_output_blocks = []
     q_attn_blocks = []
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
@@ -1103,7 +1103,11 @@ def blocked_qkv_attention_forward(
             if skip_kv:
                 skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
                 # Eager mode Only
-                if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+                if (
+                    not torch.onnx.is_in_onnx_export()
+                    and not torch.jit.is_tracing()
+                    and not torch._dynamo.is_compiling()
+                ):
                     if skip_future.item():
                         break
 
@@ -1208,7 +1212,7 @@ def blocked_hqkv_attention_forward(
     h_output_blocks = []
     h_attn_blocks = []
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
@@ -1259,7 +1263,11 @@ def blocked_hqkv_attention_forward(
                 if skip_kv:
                     skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
                     # Eager mode Only
-                    if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+                    if (
+                        not torch.onnx.is_in_onnx_export()
+                        and not torch.jit.is_tracing()
+                        and not torch._dynamo.is_compiling()
+                    ):
                         if skip_future.item():
                             break
 
@@ -1375,7 +1383,7 @@ def blocked_bhqkv_attention_forward(
     batch_block_positions = [(i * batch_size) // num_batch_blocks for i in range(num_batch_blocks)]
 
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
@@ -1439,7 +1447,11 @@ def blocked_bhqkv_attention_forward(
                     if skip_kv:
                         skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
                         # Eager mode Only
-                        if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+                        if (
+                            not torch.onnx.is_in_onnx_export()
+                            and not torch.jit.is_tracing()
+                            and not torch._dynamo.is_compiling()
+                        ):
                             if skip_future.item():
                                 break
 
@@ -1537,7 +1549,7 @@ def blocked_h_attention_forward(
     h_attn_blocks = []
 
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
@@ -1608,7 +1620,7 @@ def blocked_q_attention_forward(
     q_attn_blocks = []
 
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = value.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
@@ -1678,7 +1690,7 @@ def blocked_kv_mla_attention_forward(
     )
 
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = query.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
@@ -1711,7 +1723,7 @@ def blocked_kv_mla_attention_forward(
         if skip_kv:
             skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
             # Eager mode Only
-            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
 
@@ -1819,7 +1831,7 @@ def blocked_h_mla_attention_forward(
     num_head_blocks = math.ceil(num_heads / head_block_size)
 
     if hasattr(module, "config"):
-        mask_dtype = module.config.torch_dtype
+        mask_dtype = module.config.dtype
     else:
         mask_dtype = q_pe.dtype
     masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=q_pe.device)

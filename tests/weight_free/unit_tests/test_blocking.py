@@ -47,14 +47,11 @@ NUM_Q_BLOCKS = 2
 
 # Modes with a reliable CtxGatherBlockedKV export marker.
 BLOCKING_MODE_CASES = {
-    "kv": dict(enable_blocking=True, blocking_mode="kv", num_kv_blocks=NUM_KV_BLOCKS),
-    "qkv": dict(enable_blocking=True, blocking_mode="qkv", num_kv_blocks=NUM_KV_BLOCKS, num_q_blocks=NUM_Q_BLOCKS),
-    "hkv": dict(
-        enable_blocking=True, blocking_mode="hkv", head_block_size=HEAD_BLOCK_SIZE, num_kv_blocks=NUM_KV_BLOCKS
-    ),
+    "kv": dict(blocking_mode="kv", num_kv_blocks=NUM_KV_BLOCKS),
+    "qkv": dict(blocking_mode="qkv", num_kv_blocks=NUM_KV_BLOCKS, num_q_blocks=NUM_Q_BLOCKS),
+    "hkv": dict(blocking_mode="hkv", head_block_size=HEAD_BLOCK_SIZE, num_kv_blocks=NUM_KV_BLOCKS),
     "hqkv": (
         dict(
-            enable_blocking=True,
             blocking_mode="hqkv",
             head_block_size=HEAD_BLOCK_SIZE,
             num_kv_blocks=NUM_KV_BLOCKS,
