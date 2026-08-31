@@ -177,10 +177,18 @@ def _case_id(case: BlockingQaicCase) -> str:
     return f"{case.model_label}-{mode}{suffix}"
 
 
+SKIP_CASE_IDS = {
+    "llama-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
+    "gpt_oss-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
+}
+
+
 def _with_marks(case: BlockingQaicCase):
     marks = []
     if case.num_devices > 1:
         marks.append(pytest.mark.weight_free_multi_device)
+    if skip_reason := SKIP_CASE_IDS.get(_case_id(case)):
+        marks.append(pytest.mark.skip(reason=skip_reason))
     if case.xfail_reason:
         marks.append(pytest.mark.xfail(reason=case.xfail_reason))
     return pytest.param(case, marks=marks, id=_case_id(case))

@@ -189,7 +189,7 @@ def blocked_kv_attention_forward(
 
         skip_future = None
         if skip_kv:
-            skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+            skip_future = (current_position < start_index).all()
             # Eager mode Only
             if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
@@ -210,14 +210,9 @@ def blocked_kv_attention_forward(
                 mask_block = None
 
         if use_causal_mask or mask_block is None:
-            target_length = torch.where(
-                torch.tensor(ctx_len, dtype=torch.int) < torch.tensor(end_index, dtype=torch.int),
-                ctx_len,
-                end_index,
-            )
             causal_mask_block = _create_causal_mask(
                 position_ids=position_ids,
-                target_length=target_length,
+                target_length=end_index,
                 sliding_window=sliding_window,
                 start_index=start_index,
             )
@@ -298,7 +293,7 @@ def blocked_kv_attention_forward_decode_headpar_batch(
 
         skip_future = None
         if skip_kv:
-            skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+            skip_future = (current_position < start_index).all()
             if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
@@ -411,7 +406,7 @@ def blocked_kv_attention_forward_headpar_offline(
 
         skip_future = None
         if skip_kv:
-            skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+            skip_future = (current_position < start_index).all()
             # Eager mode Only
             if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
@@ -608,7 +603,7 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
 
             skip_future = None
             if skip_kv:
-                skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+                skip_future = (current_position < start_index).all()
                 if not is_export and skip_future.item():
                     break
 
@@ -747,7 +742,7 @@ def blocked_qkv_attention_forward_prefill_online(
 
             skip_future = None
             if skip_kv:
-                skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+                skip_future = (current_position < start_index).all()
                 if not is_export and skip_future.item():
                     break
 
@@ -838,7 +833,7 @@ def blocked_kv_attention_forward_prefill_headpar_offline(
 
         skip_future = None
         if skip_kv:
-            skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+            skip_future = (current_position < start_index).all()
             if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
@@ -1106,7 +1101,7 @@ def blocked_qkv_attention_forward(
 
             skip_future = None
             if skip_kv:
-                skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+                skip_future = (current_position < start_index).all()
                 # Eager mode Only
                 if (
                     not torch.onnx.is_in_onnx_export()
@@ -1131,15 +1126,9 @@ def blocked_qkv_attention_forward(
                     mask_block = None
 
             if use_causal_mask or mask_block is None:
-                # target_length = min(total_seen_tokens, end_index)
-                target_length = torch.where(
-                    torch.tensor(past_seen_tokens, dtype=torch.int) < torch.tensor(end_index, dtype=torch.int),
-                    past_seen_tokens,
-                    end_index,
-                )
                 causal_mask_block = _create_causal_mask(
                     position_ids=position_ids,
-                    target_length=target_length,
+                    target_length=end_index,
                     sliding_window=sliding_window,
                     start_index=start_index,
                 )
@@ -1271,7 +1260,7 @@ def blocked_hqkv_attention_forward(
 
                 skip_future = None
                 if skip_kv:
-                    skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+                    skip_future = (current_position < start_index).all()
                     # Eager mode Only
                     if (
                         not torch.onnx.is_in_onnx_export()
@@ -1299,15 +1288,9 @@ def blocked_hqkv_attention_forward(
                         mask_block = None
 
                 if use_causal_mask or mask_block is None:
-                    # target_length = min(total_seen_tokens, end_index)
-                    target_length = torch.where(
-                        torch.tensor(past_seen_tokens, dtype=torch.int) < torch.tensor(end_index, dtype=torch.int),
-                        past_seen_tokens,
-                        end_index,
-                    )
                     causal_mask_block = _create_causal_mask(
                         position_ids=position_ids,
-                        target_length=target_length,
+                        target_length=end_index,
                         sliding_window=sliding_window,
                         start_index=start_index,
                     )
@@ -1460,7 +1443,7 @@ def blocked_bhqkv_attention_forward(
 
                     skip_future = None
                     if skip_kv:
-                        skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+                        skip_future = (current_position < start_index).all()
                         # Eager mode Only
                         if (
                             not torch.onnx.is_in_onnx_export()
@@ -1490,15 +1473,9 @@ def blocked_bhqkv_attention_forward(
                             mask_block = None
 
                     if use_causal_mask or mask_block is None:
-                        # target_length = min(total_seen_tokens, end_index)
-                        target_length = torch.where(
-                            torch.tensor(past_seen_tokens, dtype=torch.int) < torch.tensor(end_index, dtype=torch.int),
-                            past_seen_tokens,
-                            end_index,
-                        )
                         causal_mask_block = _create_causal_mask(
                             position_ids=position_ids,
-                            target_length=target_length,
+                            target_length=end_index,
                             sliding_window=sliding_window,
                             start_index=start_index,
                         )
@@ -1742,7 +1719,7 @@ def blocked_kv_mla_attention_forward(
 
         skip_future = None
         if skip_kv:
-            skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
+            skip_future = (current_position < start_index).all()
             # Eager mode Only
             if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
