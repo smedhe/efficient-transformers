@@ -87,8 +87,6 @@ def main():
         num_cores=args.num_cores,
         aic_hw_version=args.aic_hw_version,
         num_devices=(2 if args.device_group is None else len(args.device_group)),
-        dynamo=True,
-        use_weight_free_export=args.use_weight_free_export,
         use_onnx_subfunctions=True,
     )
     print(f"Model compiled to: {qpc_path}")

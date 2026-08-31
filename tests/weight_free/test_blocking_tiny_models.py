@@ -17,11 +17,10 @@ from typing import Callable
 
 import pytest
 import torch
-from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, LlamaConfig
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-from QEfficient.utils.device_utils import get_available_device_id
+from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
 
 from ._helpers import assert_blocked_kv_ops_for_mode, assert_hf_hw_parity, exported_onnx_path, get_hf_tokens
 
@@ -50,6 +49,19 @@ class BlockingQaicCase:
     prompt_len: int = PROMPT_LEN_BLOCKING
     ctx_len: int = CTX_LEN_BLOCKING
     xfail_reason: str | None = None
+
+
+@dataclass
+class BlockingCompiledArtifact:
+    qeff_model: QEFFAutoModelForCausalLM
+    model_hf: torch.nn.Module
+    tokenizer: AutoTokenizer
+    compile_dir: Path
+    qpc_path: Path
+    onnx_path: Path
+
+
+_BLOCKING_QPC_CACHE: dict[tuple, BlockingCompiledArtifact] = {}
 
 
 def _make_tiny_llama_config(vocab_size: int):
@@ -179,7 +191,15 @@ def _case_id(case: BlockingQaicCase) -> str:
 
 SKIP_CASE_IDS = {
     "llama-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
+    "glm4_moe-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
     "gpt_oss-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
+    "kimi_k25_language-kv": "Kimi K2.5 is image-text-to-text; this text-only CausalLM harness is not valid",
+    "kimi_k25_language-h-mdp": "Kimi K2.5 is image-text-to-text; this text-only CausalLM harness is not valid",
+    "qwen3_vl_moe_text-prefill_q": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
+    "qwen3_vl_moe_text-prefill_kv-mdp": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
+    "qwen3_vl_moe_text-prefill_qkv-mdp": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
+    "qwen3_vl_moe_text-prefill_online": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
+    "qwen3_vl_moe_text-kv_batch_fold": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
 }
 
 
@@ -270,6 +290,7 @@ QWEN3_VL_MOE_CB_SPECIAL_MODES = (_mode("kv_batch_fold", num_kv_blocks=NUM_KV_BLO
 
 STANDARD_MODEL_SPECS = (
     BlockingModelSpec("llama", _make_tiny_llama_config),
+    BlockingModelSpec("glm4_moe", _make_tiny_glm4_moe_config),
     BlockingModelSpec("gpt_oss", _make_tiny_gpt_oss_config),
 )
 
@@ -337,13 +358,12 @@ def _save_tiny_checkpoint(case: BlockingQaicCase, tmp_path: Path):
 
 
 def _build_meta_qeff_from_checkpoint(checkpoint_dir: Path, *, continuous_batching: bool):
-    config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
-    with init_empty_weights():
-        meta_model = AutoModelForCausalLM.from_config(config, trust_remote_code=True, attn_implementation="eager")
-    return QEFFAutoModelForCausalLM(
-        meta_model,
-        pretrained_model_name_or_path=str(checkpoint_dir),
+    return QEFFAutoModelForCausalLM.from_pretrained(
+        str(checkpoint_dir),
+        weight_free=True,
         continuous_batching=continuous_batching,
+        trust_remote_code=True,
+        torch_dtype=torch.float32,
     )
 
 
@@ -353,7 +373,7 @@ def _compile_and_check_blocking(qeff_model, case: BlockingQaicCase, tmp_export_d
     if continuous_batching:
         compile_kwargs["full_batch_size"] = FULL_BATCH_SIZE
 
-    qeff_model.compile(
+    qpc_path = qeff_model.compile(
         compile_dir=str(compile_dir),
         prefill_seq_len=case.prompt_len,
         ctx_len=case.ctx_len,
@@ -362,17 +382,78 @@ def _compile_and_check_blocking(qeff_model, case: BlockingQaicCase, tmp_export_d
         batch_size=case.batch_size,
         qaic_config=copy.deepcopy(case.qaic_config),
         user_tiled=True,
-        use_weight_free_export=True,
         use_onnx_subfunctions=True,
         **compile_kwargs,
     )
+    assert compile_dir.is_dir()
+    assert Path(qpc_path).is_dir(), f"Expected QPC directory at {qpc_path}"
+    assert qeff_model.qpc_path == Path(qpc_path)
+    onnx_path = exported_onnx_path(qeff_model.onnx_path)
     assert_blocked_kv_ops_for_mode(
-        exported_onnx_path(qeff_model.onnx_path),
+        onnx_path,
         qeff_model,
         case.qaic_config["blocking_mode"],
         continuous_batching=continuous_batching,
     )
-    return compile_dir
+    return compile_dir, Path(qpc_path), onnx_path
+
+
+def _compile_cache_key(case: BlockingQaicCase, *, continuous_batching: bool) -> tuple:
+    return (
+        _case_id(case),
+        continuous_batching,
+        case.prompt_len,
+        case.ctx_len,
+        case.batch_size,
+        case.num_devices,
+        json.dumps(case.qaic_config, sort_keys=True),
+    )
+
+
+def _get_or_compile_blocking_artifact(
+    case: BlockingQaicCase,
+    tmp_path_factory,
+    *,
+    continuous_batching: bool,
+) -> BlockingCompiledArtifact:
+    cache_key = _compile_cache_key(case, continuous_batching=continuous_batching)
+    cached = _BLOCKING_QPC_CACHE.get(cache_key)
+    if cached is not None and cached.compile_dir.is_dir() and cached.qpc_path.is_dir() and cached.onnx_path.is_file():
+        return cached
+
+    artifact_dir = tmp_path_factory.mktemp(
+        f"blocking_{_case_id(case)}_{'cb' if continuous_batching else 'decode'}",
+        numbered=True,
+    )
+    checkpoint_dir, model_hf, tokenizer = _save_tiny_checkpoint(case, artifact_dir)
+    qeff_model = _build_meta_qeff_from_checkpoint(checkpoint_dir, continuous_batching=continuous_batching)
+    export_dir = artifact_dir / "qeff_weightfree_exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    compile_dir, qpc_path, onnx_path = _compile_and_check_blocking(
+        qeff_model,
+        case,
+        export_dir,
+        continuous_batching=continuous_batching,
+    )
+
+    artifact = BlockingCompiledArtifact(
+        qeff_model=qeff_model,
+        model_hf=model_hf,
+        tokenizer=tokenizer,
+        compile_dir=compile_dir,
+        qpc_path=qpc_path,
+        onnx_path=onnx_path,
+    )
+    _BLOCKING_QPC_CACHE[cache_key] = artifact
+    return artifact
+
+
+def _get_device_ids(case: BlockingQaicCase):
+    if case.num_devices <= 1:
+        return get_available_device_id()
+    device_groups = get_qaic_mdp_device_groups(devices_per_group=case.num_devices)
+    assert device_groups, f"No available QAIC MDP device group with {case.num_devices} devices"
+    return device_groups[0]
 
 
 def _assert_generate_parity(
@@ -384,12 +465,13 @@ def _assert_generate_parity(
         prompts,
         prompt_len=case.prompt_len,
         ctx_len=case.ctx_len,
+        batch_size=case.batch_size,
         full_batch_size=full_batch_size,
     )
     output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=prompts,
-        device_id=get_available_device_id(),
+        device_id=_get_device_ids(case),
     )
     assert output.generated_texts is not None
     if full_batch_size is not None:
@@ -409,16 +491,16 @@ def _assert_generate_parity(
 @pytest.mark.xdist_group(name="qaic-runtime")
 @pytest.mark.llm_model
 @pytest.mark.parametrize("case", BLOCKING_QAIC_CASES)
-def test_weight_free_tiny_blocking_compile_and_generate(case, tmp_export_dir, tmp_path):
-    checkpoint_dir, model_hf, tokenizer = _save_tiny_checkpoint(case, tmp_path)
-    qeff_model = _build_meta_qeff_from_checkpoint(checkpoint_dir, continuous_batching=False)
-    compile_dir = _compile_and_check_blocking(qeff_model, case, tmp_export_dir, continuous_batching=False)
+def test_weight_free_tiny_blocking_compile_and_generate(case, tmp_path_factory):
+    artifact = _get_or_compile_blocking_artifact(case, tmp_path_factory, continuous_batching=False)
 
-    if case.num_devices > 1:
-        assert compile_dir.is_dir()
-        return
-
-    _assert_generate_parity(case, qeff_model, model_hf, tokenizer, [PROMPT])
+    _assert_generate_parity(
+        case,
+        artifact.qeff_model,
+        artifact.model_hf,
+        artifact.tokenizer,
+        [PROMPT] * case.batch_size,
+    )
 
 
 @pytest.mark.weight_free
@@ -426,13 +508,14 @@ def test_weight_free_tiny_blocking_compile_and_generate(case, tmp_export_dir, tm
 @pytest.mark.xdist_group(name="qaic-runtime")
 @pytest.mark.llm_model
 @pytest.mark.parametrize("case", CB_BLOCKING_QAIC_CASES)
-def test_weight_free_tiny_cb_blocking_compile_and_generate(case, tmp_export_dir, tmp_path):
-    checkpoint_dir, model_hf, tokenizer = _save_tiny_checkpoint(case, tmp_path)
-    qeff_model = _build_meta_qeff_from_checkpoint(checkpoint_dir, continuous_batching=True)
-    compile_dir = _compile_and_check_blocking(qeff_model, case, tmp_export_dir, continuous_batching=True)
+def test_weight_free_tiny_cb_blocking_compile_and_generate(case, tmp_path_factory):
+    artifact = _get_or_compile_blocking_artifact(case, tmp_path_factory, continuous_batching=True)
 
-    if case.num_devices > 1:
-        assert compile_dir.is_dir()
-        return
-
-    _assert_generate_parity(case, qeff_model, model_hf, tokenizer, CB_PROMPTS, full_batch_size=FULL_BATCH_SIZE)
+    _assert_generate_parity(
+        case,
+        artifact.qeff_model,
+        artifact.model_hf,
+        artifact.tokenizer,
+        CB_PROMPTS,
+        full_batch_size=FULL_BATCH_SIZE,
+    )

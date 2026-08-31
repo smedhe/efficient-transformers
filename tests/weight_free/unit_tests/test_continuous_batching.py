@@ -15,16 +15,13 @@ CPU-only. No QAIC hardware required.
 from __future__ import annotations
 
 import pytest
-from transformers import AutoConfig
-
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
 from .._helpers import (
     WEIGHT_FREE_CAUSAL_LM_MODEL_IDS,
     assert_has_subfunctions,
     assert_retained_state_outputs,
+    build_meta_qeff_model,
     exported_onnx_path,
-    skip_on_model_fetch_error,
 )
 
 
@@ -41,14 +38,11 @@ def test_weight_free_cb_export(model_type, model_id, tmp_export_dir):
     Validates ONNX structure only (no ORT parity — CB ORT inference requires
     batch_index routing which adds significant test complexity).
     """
-    try:
-        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        config.num_hidden_layers = 2
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
-            model_id, config=config, weight_free=True, continuous_batching=True
-        )
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    qeff_model = build_meta_qeff_model(
+        model_id,
+        checkpoint_dir=tmp_export_dir / "checkpoint",
+        continuous_batching=True,
+    )
     onnx_path = exported_onnx_path(
         qeff_model.export(
             tmp_export_dir,

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import pytest
 
+from QEfficient.utils import get_num_layers_from_config
+
 from ._helpers import (
     BATCH_SIZE,
     FULL_BATCH_SIZE,
@@ -22,7 +24,6 @@ from ._helpers import (
     get_weight_free_export,
     load_hf_model,
     load_tokenizer,
-    skip_on_model_fetch_error,
 )
 
 # CCL lengths need a larger ctx_len than the tiny default used by basic tests.
@@ -63,16 +64,16 @@ def test_weight_free_ccl_compile_and_generate(model_type, model_id, tmp_export_d
     if model_type == "gpt_oss":
         pytest.xfail("gpt_oss CCL compile fails with ONNX broadcast shape mismatch")
 
-    try:
-        tokenizer = load_tokenizer(model_id)
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    tokenizer = load_tokenizer(model_id)
+    model_hf = load_hf_model(model_id)
 
-    try:
-        onnx_path, qeff_model = get_weight_free_export(model_id, tmp_path_factory, qaic_config={"ccl_enabled": True})
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    onnx_path, qeff_model = get_weight_free_export(
+        model_id,
+        tmp_path_factory,
+        num_hidden_layers=get_num_layers_from_config(model_hf.config),
+        qaic_config={"ccl_enabled": True},
+        model=model_hf,
+    )
 
     prompts = [PROMPT]
     hf_tokens = get_hf_tokens(tokenizer, model_hf, prompts, prompt_len=CCL_PREFILL_SEQ_LEN, ctx_len=CCL_CTX_LEN)
@@ -86,7 +87,6 @@ def test_weight_free_ccl_compile_and_generate(model_type, model_id, tmp_export_d
         num_cores=16,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
-        use_weight_free_export=True,
     )
     _generate(qeff_model, tokenizer, prompts, model_id, hf_tokens)
 
@@ -101,7 +101,6 @@ def test_weight_free_ccl_compile_and_generate(model_type, model_id, tmp_export_d
         num_cores=16,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
-        use_weight_free_export=True,
     )
     _generate(qeff_model, tokenizer, prompts, model_id, hf_tokens)
 
@@ -120,21 +119,17 @@ def test_weight_free_cb_ccl_compile_and_generate(model_type, model_id, tmp_expor
     if model_type == "gpt_oss":
         pytest.skip("gpt_oss CB scatter op has shape mismatch with dynamo subfunctions; pending fix")
 
-    try:
-        tokenizer = load_tokenizer(model_id)
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    tokenizer = load_tokenizer(model_id)
+    model_hf = load_hf_model(model_id)
 
-    try:
-        onnx_path, qeff_model = get_weight_free_export(
-            model_id,
-            tmp_path_factory,
-            continuous_batching=True,
-            qaic_config={"ccl_enabled": True},
-        )
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    onnx_path, qeff_model = get_weight_free_export(
+        model_id,
+        tmp_path_factory,
+        num_hidden_layers=get_num_layers_from_config(model_hf.config),
+        continuous_batching=True,
+        qaic_config={"ccl_enabled": True},
+        model=model_hf,
+    )
 
     prompts = [PROMPT] * FULL_BATCH_SIZE
     hf_tokens = get_hf_tokens(
@@ -156,7 +151,6 @@ def test_weight_free_cb_ccl_compile_and_generate(model_type, model_id, tmp_expor
         batch_size=BATCH_SIZE,
         full_batch_size=FULL_BATCH_SIZE,
         use_onnx_subfunctions=True,
-        use_weight_free_export=True,
     )
     _generate(qeff_model, tokenizer, prompts, model_id, hf_tokens, full_batch_size=FULL_BATCH_SIZE)
 
@@ -172,6 +166,5 @@ def test_weight_free_cb_ccl_compile_and_generate(model_type, model_id, tmp_expor
         batch_size=BATCH_SIZE,
         full_batch_size=FULL_BATCH_SIZE,
         use_onnx_subfunctions=True,
-        use_weight_free_export=True,
     )
     _generate(qeff_model, tokenizer, prompts, model_id, hf_tokens, full_batch_size=FULL_BATCH_SIZE)

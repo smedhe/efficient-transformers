@@ -14,7 +14,7 @@ dynamo=True internally) and use_onnx_subfunctions=True.
 
 Mirrors tests/dynamo/test_on_qaic.py — weight-free is dynamo-plus, so each
 dynamo on-QAIC test has a weight-free equivalent here, built from a
-meta-device model + use_weight_free_export=True instead of real weights +
+from_pretrained(..., weight_free=True) instead of real weights +
 dynamo=True. test_weight_free_vs_legacy_qaic_parity has no dynamo equivalent
 (it is weight-free-specific: compares a weight-free-compiled QPC against a
 legacy/dynamo-compiled QPC of the same model).
@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from transformers import AutoConfig
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils import get_num_layers_from_config
+from QEfficient.utils.device_utils import get_available_device_id
 
 from ._helpers import (
     BATCH_SIZE,
@@ -42,7 +42,6 @@ from ._helpers import (
     get_weight_free_export,
     load_hf_model,
     load_tokenizer,
-    skip_on_model_fetch_error,
 )
 
 
@@ -60,10 +59,7 @@ def test_weight_free_fp16_compile(model_type, model_id, tmp_export_dir, tmp_path
     if model_type == "gpt_oss":
         pytest.xfail()
 
-    try:
-        onnx_path, qeff_model = get_weight_free_export(model_id, tmp_path_factory)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    onnx_path, qeff_model = get_weight_free_export(model_id, tmp_path_factory)
 
     qeff_model.compile(
         onnx_path=onnx_path,
@@ -91,10 +87,7 @@ def test_weight_free_fp32_compile(model_type, model_id, tmp_export_dir, tmp_path
     if model_type == "gpt_oss":
         pytest.xfail()
 
-    try:
-        onnx_path, qeff_model = get_weight_free_export(model_id, tmp_path_factory)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    onnx_path, qeff_model = get_weight_free_export(model_id, tmp_path_factory)
 
     qeff_model.compile(
         onnx_path=onnx_path,
@@ -106,7 +99,6 @@ def test_weight_free_fp32_compile(model_type, model_id, tmp_export_dir, tmp_path
         mxfp6_matmul=False,
         mxint8_kv_cache=False,
         use_onnx_subfunctions=True,
-        use_weight_free_export=True,
     )
     assert (tmp_export_dir / "fp32_compile").is_dir()
 
@@ -125,10 +117,7 @@ def test_weight_free_multi_device_compile(model_type, model_id, tmp_export_dir, 
     if model_type == "gpt_oss":
         pytest.xfail()
 
-    try:
-        onnx_path, qeff_model = get_weight_free_export(model_id, tmp_path_factory)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    onnx_path, qeff_model = get_weight_free_export(model_id, tmp_path_factory)
 
     qeff_model.compile(
         onnx_path=onnx_path,
@@ -139,7 +128,6 @@ def test_weight_free_multi_device_compile(model_type, model_id, tmp_export_dir, 
         num_devices=4,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
-        use_weight_free_export=True,
     )
     assert (tmp_export_dir / "mdp_compile").is_dir()
 
@@ -158,11 +146,8 @@ def test_weight_free_hw_hf_parity(model_type, model_id, tmp_export_dir, tmp_path
     if model_type == "gpt_oss":
         pytest.xfail()
 
-    try:
-        tokenizer = load_tokenizer(model_id)
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    tokenizer = load_tokenizer(model_id)
+    model_hf = load_hf_model(model_id)
 
     hf_tokens = get_hf_tokens(
         tokenizer,
@@ -172,12 +157,12 @@ def test_weight_free_hw_hf_parity(model_type, model_id, tmp_export_dir, tmp_path
         ctx_len=CTX_LEN,
     )
 
-    try:
-        onnx_path, qeff_model = get_weight_free_export(
-            model_id, tmp_path_factory, num_hidden_layers=get_num_layers_from_config(model_hf.config)
-        )
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    onnx_path, qeff_model = get_weight_free_export(
+        model_id,
+        tmp_path_factory,
+        num_hidden_layers=get_num_layers_from_config(model_hf.config),
+        model=model_hf,
+    )
 
     qeff_model.compile(
         onnx_path=onnx_path,
@@ -215,11 +200,8 @@ def test_weight_free_cb_generate(model_type, model_id, tmp_export_dir, tmp_path_
     if model_type == "gpt_oss":
         pytest.xfail()
 
-    try:
-        tokenizer = load_tokenizer(model_id)
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    tokenizer = load_tokenizer(model_id)
+    model_hf = load_hf_model(model_id)
 
     prompts = ["hello world", "quick brown fox", "machine learning", "open source"]
     hf_tokens = get_hf_tokens(
@@ -231,10 +213,13 @@ def test_weight_free_cb_generate(model_type, model_id, tmp_export_dir, tmp_path_
         full_batch_size=FULL_BATCH_SIZE,
     )
 
-    try:
-        onnx_path, qeff_model = get_weight_free_export(model_id, tmp_path_factory, continuous_batching=True)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    onnx_path, qeff_model = get_weight_free_export(
+        model_id,
+        tmp_path_factory,
+        num_hidden_layers=get_num_layers_from_config(model_hf.config),
+        continuous_batching=True,
+        model=model_hf,
+    )
 
     qeff_model.compile(
         onnx_path=onnx_path,
@@ -245,7 +230,6 @@ def test_weight_free_cb_generate(model_type, model_id, tmp_export_dir, tmp_path_
         batch_size=BATCH_SIZE,
         full_batch_size=FULL_BATCH_SIZE,
         use_onnx_subfunctions=True,
-        use_weight_free_export=True,
     )
     output = qeff_model.generate(
         tokenizer=tokenizer,
@@ -280,11 +264,8 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
     if model_type == "gpt_oss":
         pytest.xfail()
 
-    try:
-        tokenizer = load_tokenizer(model_id)
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    tokenizer = load_tokenizer(model_id)
+    model_hf = load_hf_model(model_id)
 
     # Legacy/dynamo leg — real weights, no weight-free export.
     qeff_legacy = QEFFAutoModelForCausalLM(model_hf)
@@ -311,13 +292,13 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
     )
     assert legacy_output is not None, "Legacy QAIC generate returned None"
 
-    # Weight-free leg — meta-device model, matching layer count.
-    try:
-        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        config.num_hidden_layers = get_num_layers_from_config(model_hf.config)
-        qeff_weight_free = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    # Weight-free leg — meta-device model backed by a local checkpoint with the same weights.
+    qeff_weight_free = build_meta_qeff_model(
+        model_id,
+        num_hidden_layers=get_num_layers_from_config(model_hf.config),
+        checkpoint_dir=tmp_export_dir / "wf_vs_legacy_checkpoint",
+        model=model_hf,
+    )
 
     weight_free_onnx_path = exported_onnx_path(
         qeff_weight_free.export(

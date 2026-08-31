@@ -86,6 +86,18 @@ def tmp_export_dir(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def isolate_weight_free_checkpoint_home(tmp_path, monkeypatch):
+    """Keep prepared weight-free checkpoints local to each test worker run."""
+    checkpoint_home = tmp_path / "qeff_wf_home"
+    checkpoint_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("QEFF_WF_HOME", str(checkpoint_home))
+
+    from QEfficient.utils import cache as qeff_cache
+
+    monkeypatch.setattr(qeff_cache, "QEFF_CHECKPOINT_HOME", checkpoint_home)
+
+
+@pytest.fixture(autouse=True)
 def skip_if_no_qaic_device(request):
     """Auto-skip any on_qaic test when no QAIC device is ready."""
     if request.node.get_closest_marker("on_qaic"):

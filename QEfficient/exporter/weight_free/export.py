@@ -247,6 +247,15 @@ def export_weight_free_onnx(
         qeff_model=meta_qeff_model,
     )
     _prune_unused_fake_initializers(onnx_program)
+
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    for name, init in onnx_program.model.graph.initializers.items():
+        const_value = getattr(init, "const_value", None)
+        raw = getattr(const_value, "raw", None)
+        if isinstance(raw, FakeTensor) or getattr(raw, "device", None).type == "meta":
+            print("META INITIALIZER LEFT:", name, init.shape, init.dtype)
+
     onnx_program.save(str(onnx_path))
     save_weight_spec(resolve_weight_spec_path(onnx_path), spec)
 

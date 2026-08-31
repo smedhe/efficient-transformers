@@ -222,7 +222,7 @@ def main():
 
     # ── Compile decode model ──────────────────────────────────────────────────
     print("\n[1/2] Compiling decode model (blocked head-par KV)...")
-    decode_model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, **from_pretrained_kwargs)
+    decode_model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, weight_free=True, **from_pretrained_kwargs)
     decode_qpc_path = decode_model.compile(
         prefill_seq_len=1,
         ctx_len=args.ctx_len,
@@ -234,7 +234,9 @@ def main():
 
     # ── Compile prefill model ─────────────────────────────────────────────────
     print("\n[2/2] Compiling prefill model (blocked head-par prefill)...")
-    prefill_model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, **from_pretrained_kwargs)
+    prefill_model = QEFFAutoModelForCausalLM.from_pretrained(
+        args.model_name, weight_free=True, **from_pretrained_kwargs
+    )
     prefill_qpc_path = prefill_model.compile(
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=args.ctx_len,
@@ -251,14 +253,18 @@ def main():
     baseline_decode_qpc = baseline_prefill_qpc = None
     if args.compare_non_blocked:
         print("\n[2b] Compiling non-blocked baseline...")
-        baseline_decode_model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, **from_pretrained_kwargs)
+        baseline_decode_model = QEFFAutoModelForCausalLM.from_pretrained(
+            args.model_name, weight_free=True, **from_pretrained_kwargs
+        )
         baseline_decode_qpc = baseline_decode_model.compile(
             prefill_seq_len=1,
             ctx_len=args.ctx_len,
             aic_enable_depth_first=True,
             **compile_kwargs,
         )
-        baseline_prefill_model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, **from_pretrained_kwargs)
+        baseline_prefill_model = QEFFAutoModelForCausalLM.from_pretrained(
+            args.model_name, weight_free=True, **from_pretrained_kwargs
+        )
         baseline_prefill_qpc = baseline_prefill_model.compile(
             prefill_seq_len=args.prefill_seq_len,
             ctx_len=args.ctx_len,
