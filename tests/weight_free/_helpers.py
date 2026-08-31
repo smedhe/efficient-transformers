@@ -22,9 +22,8 @@ from typing import Dict, Tuple
 import numpy as np
 import onnx
 import onnxruntime
-import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
@@ -37,7 +36,7 @@ _HF_TOKEN_CACHE: Dict[Tuple[str, str, Tuple[str, ...], int, int, int, int | None
 
 # Export cache shared by QAIC weight-free tests. The key only includes export-time
 # knobs; compile-time options still get their own QPCs per test.
-_WEIGHT_FREE_ONNX_CACHE: Dict[Tuple[str, int, bool, bool], Tuple[str, "QEFFAutoModelForCausalLM"]] = {}
+_WEIGHT_FREE_ONNX_CACHE: Dict[Tuple[str, int, bool, bool, bool], Tuple[str, "QEFFAutoModelForCausalLM"]] = {}
 
 # ---------------------------------------------------------------------------
 # Model registry — same tiny-random models as tests/dynamo/
@@ -79,17 +78,11 @@ PROMPT_LEN = 8
 CTX_LEN = 16
 BATCH_SIZE = 1
 FULL_BATCH_SIZE = 4
-MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False, "torch_dtype": torch.float32}
+MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False, "dtype": torch.float32}
 
 # ---------------------------------------------------------------------------
 # Load helpers
 # ---------------------------------------------------------------------------
-
-
-def skip_on_model_fetch_error(exc: Exception, model_id: str) -> None:
-    pytest.skip(
-        f"Skipping {model_id}: model unavailable or unsupported in this environment ({type(exc).__name__}: {exc})"
-    )
 
 
 def load_hf_model(model_id: str) -> AutoModelForCausalLM:
@@ -206,9 +199,10 @@ def get_weight_free_export(
     num_hidden_layers: int = 2,
     continuous_batching: bool = False,
     qaic_config: dict | None = None,
+    model: AutoModelForCausalLM | None = None,
 ) -> Tuple[str, QEFFAutoModelForCausalLM]:
     """Export once per compatible weight-free graph shape and cache the ONNX path."""
-    key = (model_id, num_hidden_layers, continuous_batching, bool(qaic_config))
+    key = (model_id, num_hidden_layers, continuous_batching, bool(qaic_config), model is not None)
     if key in _WEIGHT_FREE_ONNX_CACHE:
         return _WEIGHT_FREE_ONNX_CACHE[key]
 
@@ -218,13 +212,18 @@ def get_weight_free_export(
     if qaic_config:
         kwargs["qaic_config"] = qaic_config
 
-    qeff_model = build_meta_qeff_model(model_id, num_hidden_layers=num_hidden_layers, **kwargs)
-
     export_dir = tmp_path_factory.mktemp("weight_free_export", numbered=True)
+    qeff_model = build_meta_qeff_model(
+        model_id,
+        num_hidden_layers=num_hidden_layers,
+        checkpoint_dir=export_dir / "checkpoint",
+        model=model,
+        **kwargs,
+    )
+
     onnx_path = exported_onnx_path(
         qeff_model.export(
             export_dir,
-            use_weight_free_export=True,
             use_onnx_subfunctions=True,
             offload_pt_weights=False,
         )
@@ -233,23 +232,84 @@ def get_weight_free_export(
     return _WEIGHT_FREE_ONNX_CACHE[key]
 
 
-def build_meta_qeff_model(model_id: str, num_hidden_layers: int = 2, **qeff_kwargs) -> QEFFAutoModelForCausalLM:
-    """Build a meta-device QEff model from config — no weights loaded into memory.
+def _set_num_hidden_layers_for_test(config, num_hidden_layers: int) -> None:
+    config.num_hidden_layers = num_hidden_layers
+    layer_types = getattr(config, "layer_types", None)
+    if layer_types is not None:
+        if len(layer_types) < num_hidden_layers:
+            layer_types = list(layer_types) + ["full_attention"] * (num_hidden_layers - len(layer_types))
+        config.layer_types = list(layer_types)[:num_hidden_layers]
 
-    This is the correct pattern for weight-free export: the model is traced on the
-    meta device (shapes only, no data), and pretrained_model_name_or_path tells the
-    export where to find the real weights for weight_spec.json.
+
+def write_local_weight_free_checkpoint(
+    model_id: str,
+    checkpoint_dir: Path,
+    *,
+    num_hidden_layers: int = 2,
+    model: AutoModelForCausalLM | None = None,
+) -> Path:
+    """Write a test-local safetensors checkpoint that matches the exported config."""
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if model is None:
+        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        _set_num_hidden_layers_for_test(config, num_hidden_layers)
+        config.dtype = torch.float32
+        config.torch_dtype = torch.float32
+        model = AutoModelForCausalLM.from_config(
+            config,
+            trust_remote_code=True,
+            attn_implementation="eager",
+        )
+    model.eval()
+    if getattr(model.config, "pad_token_id", None) is None or model.config.pad_token_id < 0:
+        model.config.pad_token_id = 0
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.pad_token_id = model.config.pad_token_id
+    model.save_pretrained(checkpoint_dir, safe_serialization=True)
+    return checkpoint_dir
+
+
+def build_meta_qeff_model(
+    model_id: str,
+    num_hidden_layers: int = 2,
+    *,
+    checkpoint_dir: Path | None = None,
+    model: AutoModelForCausalLM | None = None,
+    **qeff_kwargs,
+) -> QEFFAutoModelForCausalLM:
+    """Build a weight-free QEff model from config, with no weights loaded into memory.
+
+    The current weight-free API is from_pretrained(..., weight_free=True). It
+    constructs the HF module on meta tensors and records the checkpoint location
+    for weight_spec.json generation during export.
 
     num_hidden_layers limits the layer count so tests run quickly, matching the
-    --layers flag used by the weight-free example scripts.
-    Extra kwargs (e.g. continuous_batching=True) are forwarded to QEFFAutoModelForCausalLM.
+    --layers flag used by the weight-free example scripts. Extra kwargs, such as
+    continuous_batching=True, are forwarded to QEFFAutoModelForCausalLM.
     """
-    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-    config.num_hidden_layers = num_hidden_layers
+    model_ref = model_id
+    if checkpoint_dir is not None:
+        model_ref = str(
+            write_local_weight_free_checkpoint(
+                model_id,
+                checkpoint_dir,
+                num_hidden_layers=num_hidden_layers,
+                model=model,
+            )
+        )
+
+    config = AutoConfig.from_pretrained(model_ref, trust_remote_code=True)
+    _set_num_hidden_layers_for_test(config, num_hidden_layers)
+    config.dtype = torch.float32
     config.torch_dtype = torch.float32
-    with init_empty_weights():
-        meta_model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
-    return QEFFAutoModelForCausalLM(meta_model, pretrained_model_name_or_path=model_id, **qeff_kwargs)
+    return QEFFAutoModelForCausalLM.from_pretrained(
+        model_ref,
+        config=config,
+        weight_free=True,
+        dtype=torch.float32,
+        trust_remote_code=True,
+        **qeff_kwargs,
+    )
 
 
 def exported_onnx_path(export_result) -> Path:

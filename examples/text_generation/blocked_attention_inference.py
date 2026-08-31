@@ -67,8 +67,8 @@ def main():
         print(f"Generated: {exec_info.generated_texts[0]}")
 
     # setup qaic config to enable blocking, ensure 4 or more device ids are passed
-    qaic_config = {"blocking_mode": args.blocking_mode, "num_q_blocks": 2}
-    model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2)
+    qaic_config = {"blocking_mode": args.blocking_mode, "num_kv_blocks": 2}
+    model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2, weight_free=True)
 
     # Compile the model
     qpc_path_blocked = model_blocked.compile(
@@ -79,7 +79,6 @@ def main():
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
-        dynamo=True,
         qaic_config=qaic_config,
         user_tiled=True,
     )

@@ -20,10 +20,8 @@ CPU-only. No QAIC hardware required.
 from __future__ import annotations
 
 import pytest
-from transformers import AutoConfig
 
 from QEfficient.exporter.weight_free import resolve_weight_spec_path
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.run_utils import ApiRunner
 
@@ -37,11 +35,11 @@ from .._helpers import (
     assert_retained_state_outputs,
     assert_subfunction_names_match_decoder_class,
     assert_unique_graph_input_names,
+    build_meta_qeff_model,
     exported_onnx_path,
     load_hf_model,
     load_tokenizer,
     run_weight_free_ort,
-    skip_on_model_fetch_error,
 )
 
 
@@ -61,15 +59,8 @@ def test_weight_free_export_onnx_structure(model_type, model_id, tmp_export_dir)
 
     CPU-only. No QAIC hardware or weight injection required.
     """
-    try:
-        # Build meta-device model — no weights loaded, only shapes.
-        # pretrained_model_name_or_path is carried in the QEff model so the export
-        # can write weight_spec.json pointing at the HF cache checkpoint.
-        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        config.num_hidden_layers = 2
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    # Build meta-device model with a test-local checkpoint.
+    qeff_model = build_meta_qeff_model(model_id, checkpoint_dir=tmp_export_dir / "checkpoint")
 
     onnx_path = exported_onnx_path(
         qeff_model.export(
@@ -107,11 +98,8 @@ def test_weight_free_export_ort_parity(model_type, model_id, tmp_export_dir):
 
     CPU-only. No QAIC hardware required.
     """
-    try:
-        model_hf = load_hf_model(model_id)
-        tokenizer = load_tokenizer(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    model_hf = load_hf_model(model_id)
+    tokenizer = load_tokenizer(model_id)
 
     api_runner = ApiRunner(
         batch_size=BATCH_SIZE,
@@ -131,12 +119,12 @@ def test_weight_free_export_ort_parity(model_type, model_id, tmp_export_dir):
     # load_weight_free_ort_inputs(weight_spec_path, inputs).
     # The exported model must have the same layer count as model_hf, or the
     # HF PT and ORT token streams come from architecturally different models.
-    try:
-        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        config.num_hidden_layers = get_num_layers_from_config(model_hf.config)
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    qeff_model = build_meta_qeff_model(
+        model_id,
+        num_hidden_layers=get_num_layers_from_config(model_hf.config),
+        checkpoint_dir=tmp_export_dir / "checkpoint",
+        model=model_hf,
+    )
 
     onnx_path = exported_onnx_path(
         qeff_model.export(

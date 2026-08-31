@@ -20,7 +20,6 @@ from .._helpers import (
     WEIGHT_FREE_CAUSAL_LM_MODEL_IDS,
     build_meta_qeff_model,
     exported_onnx_path,
-    skip_on_model_fetch_error,
 )
 
 # Same supported model set used by tests/dynamo/unit_tests/test_blocking.py.
@@ -75,10 +74,7 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
     # transform() mutates qaic_config.
     qaic_config = dict(BLOCKING_MODE_CASES[blocking_key])
 
-    try:
-        qeff_model = build_meta_qeff_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    qeff_model = build_meta_qeff_model(model_id, checkpoint_dir=tmp_export_dir / f"checkpoint_{blocking_key}")
     qeff_model.transform(
         ctx_len=CTX_LEN,
         seq_len=PROMPT_LEN,
@@ -89,7 +85,6 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
     onnx_path = exported_onnx_path(
         qeff_model.export(
             tmp_export_dir,
-            use_weight_free_export=True,
             use_onnx_subfunctions=True,
             offload_pt_weights=False,
         )

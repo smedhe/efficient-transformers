@@ -20,7 +20,6 @@ from ._helpers import (
     get_hf_tokens,
     load_hf_model,
     load_tokenizer,
-    skip_on_model_fetch_error,
 )
 
 pytestmark = pytest.mark.skip(
@@ -121,10 +120,7 @@ def test_weight_free_blocking_compile_and_generate(model_type, model_id, blockin
     is_multi_device = blocking_key in MULTI_DEVICE_BLOCKING_KEYS
     num_devices = HEAD_BLOCKING_NUM_DEVICES if is_multi_device else 1
 
-    try:
-        qeff_model = build_meta_qeff_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    qeff_model = build_meta_qeff_model(model_id)
 
     compile_dir = tmp_export_dir / f"{blocking_key}_compile"
     qeff_model.compile(
@@ -136,18 +132,14 @@ def test_weight_free_blocking_compile_and_generate(model_type, model_id, blockin
         batch_size=BATCH_SIZE,
         qaic_config=qaic_config,
         user_tiled=True,
-        use_weight_free_export=True,
         use_onnx_subfunctions=True,
     )
     if is_multi_device:
         assert compile_dir.is_dir()
         return
 
-    try:
-        tokenizer = load_tokenizer(model_id)
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    tokenizer = load_tokenizer(model_id)
+    model_hf = load_hf_model(model_id)
 
     prompts = [PROMPT]
     hf_tokens = get_hf_tokens(tokenizer, model_hf, prompts, prompt_len=PROMPT_LEN_BLOCKING, ctx_len=CTX_LEN_BLOCKING)
@@ -180,10 +172,7 @@ def test_weight_free_cb_blocking_compile_and_generate(model_type, model_id, bloc
     is_multi_device = blocking_key in MULTI_DEVICE_BLOCKING_KEYS
     num_devices = HEAD_BLOCKING_NUM_DEVICES if is_multi_device else 1
 
-    try:
-        qeff_model = build_meta_qeff_model(model_id, continuous_batching=True)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    qeff_model = build_meta_qeff_model(model_id, continuous_batching=True)
 
     compile_dir = tmp_export_dir / f"cb_{blocking_key}_compile"
     qeff_model.compile(
@@ -196,18 +185,14 @@ def test_weight_free_cb_blocking_compile_and_generate(model_type, model_id, bloc
         full_batch_size=FULL_BATCH_SIZE,
         qaic_config=qaic_config,
         user_tiled=True,
-        use_weight_free_export=True,
         use_onnx_subfunctions=True,
     )
     if is_multi_device:
         assert compile_dir.is_dir()
         return
 
-    try:
-        tokenizer = load_tokenizer(model_id)
-        model_hf = load_hf_model(model_id)
-    except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+    tokenizer = load_tokenizer(model_id)
+    model_hf = load_hf_model(model_id)
 
     prompts = [PROMPT] * FULL_BATCH_SIZE
     hf_tokens = get_hf_tokens(
