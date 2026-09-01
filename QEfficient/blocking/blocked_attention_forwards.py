@@ -210,12 +210,12 @@ def blocked_kv_attention_forward(
                 mask_block = None
 
         if use_causal_mask or mask_block is None:
-            # target_length = torch.where(
-            #     torch.tensor(ctx_len, dtype=torch.int) < torch.tensor(end_index, dtype=torch.int),
-            #     ctx_len,
-            #     end_index,
-            # )
-            target_length = min(ctx_len, end_index)
+            target_length = torch.where(
+                torch.tensor(ctx_len, dtype=torch.int) < torch.tensor(end_index, dtype=torch.int),
+                torch.tensor(ctx_len, dtype=torch.int),
+                torch.tensor(end_index, dtype=torch.int),
+            )
+            # target_length = min(ctx_len, end_index)
             causal_mask_block = _create_causal_mask(
                 position_ids=position_ids,
                 target_length=target_length,

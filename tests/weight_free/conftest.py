@@ -41,16 +41,8 @@ def pytest_configure(config):
     )
 
 
-_XFAIL_MODELS = {"gpt_oss"}
-_XFAIL_REASON = (
-    "gpt_oss: dynamo=True + use_onnx_subfunctions=True triggers SerdeError "
-    "(ir_version=10, serialize_model_into); export must use use_onnx_subfunctions=False"
-)
-
-
 def pytest_collection_modifyitems(config, items):
     torch_version = _parse_torch_version()
-    xfail_models = pytest.mark.xfail(reason=_XFAIL_REASON, strict=False)
     for item in items:
         if not (item.fspath.parts and "weight_free" in str(item.fspath)):
             continue
@@ -58,9 +50,6 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(
                 pytest.mark.skip(reason=f"Weight-free tests require torch >= 2.13; running {torch.__version__}")
             )
-        for model in _XFAIL_MODELS:
-            if f"[{model}]" in item.nodeid or f"[{model}@" in item.nodeid:
-                item.add_marker(xfail_models)
 
 
 @pytest.fixture(autouse=True)
