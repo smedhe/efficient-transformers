@@ -7,7 +7,7 @@
 
 import argparse
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig
 
 from QEfficient import QEFFAutoModelForCausalLM
 
@@ -43,9 +43,11 @@ def main():
 
     # Load tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    config = AutoConfig.from_pretrained(args.model_name)
+    config.num_hidden_layers = 4  # Reduce number of layers for faster inference
 
     if args.compare_non_blocking:
-        model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2)
+        model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, config=config)
 
         # Compile the model
         qpc_path = model.compile(
@@ -68,7 +70,7 @@ def main():
 
     # setup qaic config to enable blocking, ensure 4 or more device ids are passed
     qaic_config = {"blocking_mode": args.blocking_mode, "num_kv_blocks": 2}
-    model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=2, weight_free=True)
+    model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, config=config, weight_free=False)
 
     # Compile the model
     qpc_path_blocked = model_blocked.compile(

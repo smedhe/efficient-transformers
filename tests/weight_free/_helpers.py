@@ -346,6 +346,7 @@ def assert_has_subfunctions(onnx_path: Path, qeff_model: QEFFAutoModelForCausalL
 
 
 _BLOCKED_KV_MARKER_MODES = {"kv", "qkv", "hkv", "hqkv", "bhqkv", "kv_headpar", "kv_batch_fold"}
+_CB_BLOCKED_KV_MARKER_MODES = {"kv", "qkv", "hkv", "hqkv", "bhqkv"}
 
 
 def assert_blocked_kv_ops_for_mode(
@@ -386,6 +387,12 @@ def assert_blocked_kv_ops_for_mode(
         expected_ops.add("CtxGatherBlockedKVCB")
 
     found_ops = {op_name: op_counts[op_name] for op_name in sorted(expected_ops) if op_counts[op_name]}
+    if continuous_batching and blocking_key in _CB_BLOCKED_KV_MARKER_MODES:
+        assert op_counts["CtxGatherBlockedKVCB"], (
+            f"Expected continuous-batching blocked KV custom op marker 'CtxGatherBlockedKVCB' "
+            f"for mode '{blocking_key}' in {onnx_path.name}. "
+            f"Found blocked KV ops: {found_ops}. Ops present: {dict(op_counts)}"
+        )
     assert found_ops, (
         f"Expected blocked KV custom op marker for mode '{blocking_key}' in {onnx_path.name}, "
         f"but none of {sorted(expected_ops)} were present. "

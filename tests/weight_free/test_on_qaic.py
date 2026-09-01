@@ -261,14 +261,12 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
     Weight-free-only: no dynamo equivalent, since it compares two independently
     compiled QPCs of the same model (weight-free vs legacy) rather than HF PT.
     """
-    if model_type == "gpt_oss":
-        pytest.xfail()
 
     tokenizer = load_tokenizer(model_id)
     model_hf = load_hf_model(model_id)
 
     # Legacy/dynamo leg — real weights, no weight-free export.
-    qeff_legacy = QEFFAutoModelForCausalLM(model_hf)
+    qeff_legacy = QEFFAutoModelForCausalLM.from_pretrained(model_id)
     legacy_onnx_path = exported_onnx_path(
         qeff_legacy.export(
             tmp_export_dir / "legacy_export",
@@ -285,6 +283,7 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
         num_cores=16,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
+        dynamo=True,
     )
     legacy_output = qeff_legacy.generate(
         tokenizer=tokenizer,
