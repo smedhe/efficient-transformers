@@ -1637,7 +1637,7 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
         self,
         start_idx: torch.Tensor,
         end_idx: torch.Tensor,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
+        cache_kwargs: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         position_ids = cache_kwargs.get("position_ids")
         batch_index = cache_kwargs.get("batch_index", None)  # Check and fetch batch index value from the kwargs
