@@ -31,7 +31,7 @@ The path to the treasure was not an easy one. Alex had to navigate through dense
 """
 # Run prefill
 config = AutoConfig.from_pretrained(model_id)
-config.num_hidden_layers = 2
+# config.num_hidden_layers = 2
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 PREFILL_SEQ_LEN = 512
 PROMPT_LEN = 4096

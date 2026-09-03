@@ -1215,7 +1215,7 @@ def blocked_hqkv_attention_forward(
     num_head_blocks = math.ceil(num_heads / head_block_size)
     num_q_blocks = max(1, num_q_blocks) if num_q_blocks else 1
     q_block_positions = [-(-i * seq_len) // num_q_blocks for i in range(num_q_blocks)]
-    num_kv_blocks = max(1, num_kv_blocks)
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks else 1
     kv_block_size = -(-past_seen_tokens // num_kv_blocks) if num_kv_blocks else 1
 
     h_output_blocks = []
