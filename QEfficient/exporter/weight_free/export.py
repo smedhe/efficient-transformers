@@ -5,6 +5,7 @@
 #
 # ----------------------------------------------------------------------------
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -136,19 +137,25 @@ def _prune_unused_fake_initializers(onnx_program) -> None:
             del initializers[name]
 
 
-def _expert_parallel_checkpoint_suffix(qeff_model) -> str:
-    hash_params = getattr(qeff_model, "hash_params", {}) or {}
-    flavour = hash_params.get("moe_prefill_flavour")
-    if hasattr(flavour, "value"):
-        flavour = flavour.value
-    if flavour != "expert_parallel":
-        return ""
+def _prepared_checkpoint_hash(
+    model_ref: str,
+    target_dtype: torch.dtype,
+    active_group_transform_id: str,
+    moe_prefill_flavour: str,
+) -> str:
+    """Return a 12-char content-addressable hash for the prepared checkpoint.
 
-    num_parallelized_experts = hash_params.get("moe_prefill_num_parallelized_experts")
-    num_pipeline_stages = hash_params.get("moe_prefill_num_pipeline_stages")
-    if num_parallelized_experts is None or num_pipeline_stages is None:
-        return ""
-    return f"-moe-expert-parallel-{num_parallelized_experts}x{num_pipeline_stages}"
+    Encodes what was done to the weights so that different model flavours
+    (dense vs MoE, decode vs expert_parallel, different quantizations) always
+    hash to different prepared directories and never overwrite each other.
+    """
+    content = {
+        "model_ref": model_ref,
+        "target_dtype": str(target_dtype),
+        "active_group": active_group_transform_id,
+        "moe_flavour": moe_prefill_flavour,
+    }
+    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def _prepare_checkpoint_for_weight_free_export(
@@ -172,25 +179,41 @@ def _prepare_checkpoint_for_weight_free_export(
     str
         Path to the prepared checkpoint directory.
     """
-    from QEfficient.base.checkpoint_transforms import CheckpointTransformPipeline
+    from QEfficient.base.checkpoint_transforms import CheckpointTransformPipeline, detect_group_transform_id
     from QEfficient.utils.cache import QEFF_CHECKPOINT_HOME
+    from QEfficient.utils.checkpoint_utils import read_weight_map
 
     source_dir = resolve_checkpoint_dir(model_ref)
-    dtype_suffix = str(target_dtype).replace("torch.", "")
-    # TODO(wf): For different flavours of the model that expect different checkpoint weight layouts,
-    # we end up overriding old one. We need to add support of hashing/caching here.
-    prepared_name = source_dir.name + f"-qeff-prepared-{dtype_suffix}{_expert_parallel_checkpoint_suffix(qeff_model)}"
+    hash_params = qeff_model.hash_params
+
+    # Detect the active group transform from config + index so the output path
+    # is content-addressable.  Two flavours of the same model (e.g. decode vs
+    # expert_parallel prefill) will hash to different prepared dirs and never
+    # overwrite each other.
+    weight_map = read_weight_map(source_dir)
+    active_group_id = detect_group_transform_id(getattr(qeff_model.model, "config", None), weight_map, hash_params)
+    moe_prefill_flavour = hash_params.get("moe_prefill_flavour", "none")
+
+    prepared_hash = _prepared_checkpoint_hash(
+        model_ref=model_ref,
+        target_dtype=target_dtype,
+        active_group_transform_id=active_group_id,
+        moe_prefill_flavour=moe_prefill_flavour,
+    )
+    prepared_name = source_dir.name + f"-qeff-prepared-{prepared_hash}"
     if QEFF_CHECKPOINT_HOME:
         prepared_out = QEFF_CHECKPOINT_HOME.expanduser() / prepared_name
     else:
         prepared_out = source_dir.parent / prepared_name
+
     prep_pipeline = CheckpointTransformPipeline(transforms=qeff_model._checkpoint_transforms)
     return str(
         prep_pipeline.apply(
             src=source_dir,
             out=prepared_out,
             target_dtype=target_dtype,
-            hash_params=dict(getattr(qeff_model, "hash_params", {}) or {}),
+            config=getattr(qeff_model.model, "config", None),
+            hash_params=hash_params,
         )
     )
 
