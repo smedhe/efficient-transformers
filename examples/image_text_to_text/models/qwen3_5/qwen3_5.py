@@ -69,6 +69,7 @@ if skip_vision:
         mos=1,
         split_model_io=True,
         use_onnx_subfunctions=True,
+        dynamo=True,
         # comp_ctx_lengths_prefill=comp_ctx_lengths_prefill,
         # comp_ctx_lengths_decode=comp_ctx_lengths_decode,
         # qaic_config=qaic_config,  # Enable KV blocking - comment out to disable

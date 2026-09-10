@@ -9,11 +9,10 @@
 
 from __future__ import annotations
 
-from collections import Counter
-
 import onnx
 import pytest
 
+from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
 from .._helpers import (
@@ -22,6 +21,7 @@ from .._helpers import (
     DYNAMO,
     DYNAMO_CAUSAL_LM_MODEL_IDS,
     PROMPT_LEN,
+    assert_blocked_kv_ops_for_mode,
     exported_onnx_path,
     skip_on_hf_model_load_error,
 )
@@ -48,7 +48,7 @@ HEAD_BLOCK_SIZE = 2
 NUM_KV_BLOCKS = 2
 NUM_Q_BLOCKS = 2
 
-# Modes with a reliable CtxGatherBlockedKV export marker.
+# Modes with reliable mode-specific blocked-KV export markers.
 BLOCKING_MODE_CASES = {
     "kv": dict(enable_blocking=True, blocking_mode="kv", num_kv_blocks=NUM_KV_BLOCKS),
     "qkv": dict(enable_blocking=True, blocking_mode="qkv", num_kv_blocks=NUM_KV_BLOCKS, num_q_blocks=NUM_Q_BLOCKS),
@@ -72,7 +72,7 @@ BLOCKING_MODE_CASES = {
 @pytest.mark.parametrize("blocking_key", list(BLOCKING_MODE_CASES))
 @pytest.mark.parametrize("model_type,model_id", sorted(BLOCKING_MODEL_IDS.items()), ids=sorted(BLOCKING_MODEL_IDS))
 def test_dynamo_blocking_export_gather_ops(model_type, model_id, blocking_key, tmp_export_dir):
-    """Verify KV-blocking modes emit CtxGatherBlockedKV in decoder subfunctions."""
+    """Verify KV-blocking modes emit the expected gather marker in decoder subfunctions."""
     if model_type == "gpt_oss":
         pytest.xfail("gpt_oss forward() disables blocking whenever self.sliding_window is not None")
     if blocking_key == "hkv":
@@ -91,6 +91,12 @@ def test_dynamo_blocking_export_gather_ops(model_type, model_id, blocking_key, t
         bs=1,
         qaic_config=qaic_config,
     )
+    expected_mode = BlockingMode(BLOCKING_MODE_CASES[blocking_key]["blocking_mode"])
+    attached_configs = [
+        module.attn_blocking_config for module in qeff_model.model.modules() if hasattr(module, "attn_blocking_config")
+    ]
+    assert attached_configs, "Expected blocking config on at least one attention module"
+    assert all(config.mode == expected_mode for config in attached_configs)
 
     onnx_path = exported_onnx_path(
         qeff_model.export(
@@ -110,10 +116,4 @@ def test_dynamo_blocking_export_gather_ops(model_type, model_id, blocking_key, t
         f"Functions present: {[fn.name for fn in onnx_model.functions]}"
     )
 
-    for function_proto in decoder_functions:
-        op_counts = Counter(node.op_type for node in function_proto.node)
-        blocked_kv_count = op_counts["CtxGatherBlockedKV"]
-        assert blocked_kv_count > 0, (
-            f"Expected CtxGatherBlockedKV ops in {function_proto.name} for mode '{blocking_key}' "
-            f"but found none. Ops present: {dict(op_counts)}"
-        )
+    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)

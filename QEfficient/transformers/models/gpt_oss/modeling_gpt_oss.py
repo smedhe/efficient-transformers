@@ -671,8 +671,6 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
 
-        
-
         if use_blocking:
             attention_interface = generic_blocked_attention_interface
         else:

@@ -19,7 +19,9 @@ from ._helpers import (
     DYNAMO,
     DYNAMO_CAUSAL_LM_MODEL_IDS,
     FULL_BATCH_SIZE,
+    assert_blocked_kv_ops_for_mode,
     assert_hf_hw_parity,
+    exported_onnx_path,
     get_hf_tokens,
     load_hf_model,
     load_tokenizer,
@@ -51,6 +53,7 @@ NUM_BATCH_BLOCKS = 2
 PROMPT_LEN_BLOCKING = 32
 CTX_LEN_BLOCKING = 128
 PROMPT = "hello world"
+CB_PROMPTS = ["hello world", "quick brown fox", "machine learning", "open source"]
 # Head blocking is meaningful only with multiple devices.
 HEAD_BLOCKING_NUM_DEVICES = 4
 MULTI_DEVICE_BLOCKING_KEYS = {"head", "hq", "hkv", "hqkv", "bhqkv"}
@@ -60,7 +63,7 @@ XFAIL_BLOCKING_KEYS = {"hq", "hkv", "bhqkv"}
 BLOCKING_QAIC_CONFIGS = {
     "head": dict(enable_blocking=True, blocking_mode="h", head_block_size=HEAD_BLOCK_SIZE),
     "kv": dict(enable_blocking=True, blocking_mode="kv", num_kv_blocks=NUM_KV_BLOCKS),
-    "q": dict(enable_blocking=True, blocking_mode="q", num_kv_blocks=NUM_KV_BLOCKS),
+    "q": dict(enable_blocking=True, blocking_mode="q", num_q_blocks=NUM_Q_BLOCKS),
     "qkv": dict(enable_blocking=True, blocking_mode="qkv", num_kv_blocks=NUM_KV_BLOCKS, num_q_blocks=NUM_Q_BLOCKS),
     "hq": dict(enable_blocking=True, blocking_mode="hq", head_block_size=HEAD_BLOCK_SIZE, num_q_blocks=NUM_Q_BLOCKS),
     "hkv": dict(
@@ -138,6 +141,8 @@ def test_dynamo_blocking_compile_and_generate(model_type, model_id, blocking_key
         dynamo=DYNAMO,
         use_onnx_subfunctions=True,
     )
+    onnx_path = exported_onnx_path(qeff_model.onnx_path)
+    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
 
     if is_multi_device:
         assert compile_dir.is_dir()
@@ -199,6 +204,8 @@ def test_dynamo_cb_blocking_compile_and_generate(model_type, model_id, blocking_
         dynamo=DYNAMO,
         use_onnx_subfunctions=True,
     )
+    onnx_path = exported_onnx_path(qeff_model.onnx_path)
+    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key, continuous_batching=True)
 
     if is_multi_device:
         assert compile_dir.is_dir()
@@ -210,7 +217,7 @@ def test_dynamo_cb_blocking_compile_and_generate(model_type, model_id, blocking_
     except Exception as exc:
         skip_on_hf_model_load_error(exc, model_id)
 
-    prompts = [PROMPT] * FULL_BATCH_SIZE
+    prompts = CB_PROMPTS
     hf_tokens = get_hf_tokens(
         tokenizer,
         model_hf,

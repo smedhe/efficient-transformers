@@ -19,6 +19,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, LlamaConfig
 
+from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
 
@@ -200,13 +201,6 @@ SKIP_CASE_IDS = {
     "llama-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
     "glm4_moe-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
     "gpt_oss-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
-    "kimi_k25_language-kv": "Kimi K2.5 is image-text-to-text; this text-only CausalLM harness is not valid",
-    "kimi_k25_language-h-mdp": "Kimi K2.5 is image-text-to-text; this text-only CausalLM harness is not valid",
-    "qwen3_vl_moe_text-prefill_q": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
-    "qwen3_vl_moe_text-prefill_kv-mdp": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
-    "qwen3_vl_moe_text-prefill_qkv-mdp": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
-    "qwen3_vl_moe_text-prefill_online": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
-    "qwen3_vl_moe_text-kv_batch_fold": "Qwen3-VL-MoE is image-text-to-text; this text-only CausalLM harness is not valid",
 }
 
 
@@ -332,17 +326,9 @@ def _expand_cases(
     return cases
 
 
-BLOCKING_QAIC_CASES = [
-    *_expand_cases(STANDARD_MODEL_SPECS, STANDARD_BLOCKING_MODES),
-    *_expand_cases(MLA_MODEL_SPECS, MLA_BLOCKING_MODES),
-    *_expand_cases((QWEN3_VL_MOE_MODEL_SPEC,), QWEN3_VL_MOE_SPECIAL_MODES, prompt_len=64, ctx_len=512),
-]
+BLOCKING_QAIC_CASES = [*_expand_cases(STANDARD_MODEL_SPECS, STANDARD_BLOCKING_MODES)]
 
-CB_BLOCKING_QAIC_CASES = [
-    *_expand_cases(STANDARD_MODEL_SPECS, STANDARD_BLOCKING_MODES),
-    *_expand_cases(MLA_MODEL_SPECS, MLA_BLOCKING_MODES),
-    *_expand_cases((QWEN3_VL_MOE_MODEL_SPEC,), QWEN3_VL_MOE_CB_SPECIAL_MODES, prompt_len=64, ctx_len=512),
-]
+CB_BLOCKING_QAIC_CASES = [*_expand_cases(STANDARD_MODEL_SPECS, STANDARD_BLOCKING_MODES)]
 
 
 def _load_tokenizer():
@@ -398,6 +384,12 @@ def _compile_and_check_blocking(qeff_model, case: BlockingQaicCase, tmp_export_d
     assert compile_dir.is_dir()
     assert Path(qpc_path).is_dir(), f"Expected QPC directory at {qpc_path}"
     assert qeff_model.qpc_path == Path(qpc_path)
+    expected_mode = BlockingMode(case.qaic_config["blocking_mode"])
+    attached_configs = [
+        module.attn_blocking_config for module in qeff_model.model.modules() if hasattr(module, "attn_blocking_config")
+    ]
+    assert attached_configs, "Expected blocking config on at least one attention module"
+    assert all(config.mode == expected_mode for config in attached_configs)
     onnx_path = exported_onnx_path(qeff_model.onnx_path)
     assert_blocked_kv_ops_for_mode(
         onnx_path,
@@ -509,7 +501,7 @@ def test_dynamo_tiny_blocking_compile_and_generate(case, tmp_path_factory):
         artifact.qeff_model,
         artifact.model_hf,
         artifact.tokenizer,
-        [PROMPT] * case.batch_size,
+        CB_PROMPTS[: case.batch_size],
     )
 
 

@@ -206,7 +206,28 @@ def _make_past_key_values(config, batch_size: int, ctx_len: int):
     )
 
 
-def _make_inputs(model: nn.Module, case: DispatchCase):
+def _apply_qeff_kv_transforms(model: nn.Module, model_label: str):
+    model, _ = CustomOpsTransform.apply(model)
+    model, external_kv_transformed = KVCacheExternalModuleMapperTransform.apply(model)
+    model, kv_transformed = KVCacheTransform.apply(model)
+    assert kv_transformed or external_kv_transformed, f"[{model_label}] KV cache transform did not transform the model"
+    return model
+
+
+def _clone_tensor_inputs(inputs):
+    def clone_value(value):
+        if torch.is_tensor(value):
+            return value.clone()
+        if isinstance(value, tuple):
+            return tuple(clone_value(item) for item in value)
+        if isinstance(value, list):
+            return [clone_value(item) for item in value]
+        return value
+
+    return {key: clone_value(value) for key, value in inputs.items()}
+
+
+def _make_inputs(model: nn.Module, case: DispatchCase, *, include_batch_index: bool = True):
     config = model.config
     input_ids = torch.randint(0, int(getattr(config, "vocab_size", VOCAB_SIZE)), (case.batch_size, case.seq_len))
     if case.model_label.startswith("qwen3_vl_moe"):
@@ -216,9 +237,11 @@ def _make_inputs(model: nn.Module, case: DispatchCase):
     inputs = {
         "input_ids": input_ids,
         "position_ids": position_ids,
-        "batch_index": torch.arange(case.batch_size, dtype=torch.long),
         "use_cache": True,
     }
+    if include_batch_index:
+        inputs["batch_index"] = torch.arange(case.batch_size, dtype=torch.long)
+
     if "kimi" in case.model_label:
         inputs["compressed_kvs"] = model.get_dummy_pkv_cache(config, case.batch_size, case.ctx_len)
     else:
@@ -242,12 +265,7 @@ def _assert_valid_output(output, model: nn.Module, case: DispatchCase):
 
 
 def _apply_blocking(model: nn.Module, case: DispatchCase):
-    model, _ = CustomOpsTransform.apply(model)
-    model, external_kv_transformed = KVCacheExternalModuleMapperTransform.apply(model)
-    model, kv_transformed = KVCacheTransform.apply(model)
-    assert kv_transformed or external_kv_transformed, (
-        f"[{case.model_label}] KV cache transform did not transform the model"
-    )
+    model = _apply_qeff_kv_transforms(model, case.model_label)
     if (mla_absorption := case.qaic_config.get("mla_absorption")) is not None:
         setattr(model, "mla_absorption", mla_absorption)
 
@@ -266,6 +284,11 @@ def _apply_blocking(model: nn.Module, case: DispatchCase):
         if case.qaic_config.get(optional_param) is not None:
             setattr(blocking_config, optional_param, case.qaic_config[optional_param])
 
+    expected_config_mode = BlockingMode.resolve(case.qaic_config["blocking_mode"])
+    if case.expected_mode not in {BlockingMode.KV_MLA, BlockingMode.H_MLA}:
+        expected_config_mode = case.expected_mode
+    assert blocking_config.mode == expected_config_mode
+
     model, blocking_transformed = BlockingAttentionTransform.apply(model, blocking_config)
     assert blocking_transformed, f"[{case.model_label}] BlockingAttentionTransform did not transform the model"
 
@@ -273,7 +296,7 @@ def _apply_blocking(model: nn.Module, case: DispatchCase):
     assert attn_modules, f"[{case.model_label}] no QEff attention modules found"
     for module in attn_modules:
         assert module.attn_blocking_config is blocking_config
-        assert module.attn_blocking_config.mode == BlockingMode(case.qaic_config["blocking_mode"])
+        assert module.attn_blocking_config.mode == expected_config_mode
 
     return model
 
@@ -433,3 +456,75 @@ def test_dynamo_blocking_forward_dispatch(case: DispatchCase):
 
     assert strategy_spy.called, f"[{_case_id(case)}] expected {case.expected_mode.value} blocking forward to run"
     _assert_valid_output(output, model, case)
+
+
+_LLAMA_CPU_PARITY_MODES = {
+    BlockingMode.Q,
+    BlockingMode.H,
+    BlockingMode.KV,
+    BlockingMode.QKV,
+    BlockingMode.HQKV,
+    BlockingMode.BHQKV,
+    BlockingMode.KV_HEADPAR,
+}
+_LLAMA_CPU_PARITY_CASES = [
+    case
+    for case in DISPATCH_CASES
+    if case.model_label == "llama" and case.expected_mode in _LLAMA_CPU_PARITY_MODES and case.skip_reason is None
+]
+
+
+@pytest.mark.dynamo
+@pytest.mark.parametrize("case", _LLAMA_CPU_PARITY_CASES, ids=_case_id)
+def test_dynamo_llama_blocking_cpu_logits_parity(case: DispatchCase):
+    torch.manual_seed(7)
+    base = case.make_model()
+    unblocked = _apply_qeff_kv_transforms(copy.deepcopy(base), case.model_label).eval()
+    blocked = _apply_blocking(copy.deepcopy(base), case).eval()
+    inputs = _make_inputs(blocked, case, include_batch_index=False)
+
+    with torch.no_grad():
+        unblocked_output = unblocked(**_clone_tensor_inputs(inputs))
+        blocked_output = blocked(**_clone_tensor_inputs(inputs))
+
+    torch.testing.assert_close(
+        blocked_output.logits.float(),
+        unblocked_output.logits.float(),
+        rtol=1e-3,
+        atol=1e-3,
+        msg=f"[{_case_id(case)}] blocked and unblocked QEff CPU logits diverged",
+    )
+
+
+@pytest.mark.dynamo
+@pytest.mark.parametrize(
+    ("attention_cfg", "expected_mode"),
+    [
+        (
+            {"head_blocking_enabled": False, "head_block_size": 1, "num_q_blocks": 2, "num_kv_blocks": 1},
+            BlockingMode.Q,
+        ),
+        (
+            {"head_blocking_enabled": False, "head_block_size": 1, "num_q_blocks": 1, "num_kv_blocks": 2},
+            BlockingMode.KV,
+        ),
+        (
+            {"head_blocking_enabled": True, "head_block_size": 2, "num_q_blocks": 2, "num_kv_blocks": 2},
+            BlockingMode.HQKV,
+        ),
+    ],
+    ids=["hqkv_to_q", "hqkv_to_kv", "hqkv_stays_hqkv"],
+)
+def test_dynamo_blocking_auto_hqkv_reduction_is_explicit(attention_cfg, expected_mode):
+    with patch("QEfficient.blocking.blocking_configurator.attention_configurator", return_value=attention_cfg):
+        blocking_config = build_transformer_blocking_config_for_transform(
+            _make_tiny_llama().config,
+            ctx_len=CTX_LEN,
+            seq_len=SEQ_LEN,
+            bs=BATCH_SIZE,
+            num_devices=1,
+            qaic_config={"blocking_mode": "hqkv"},
+            aic_num_cores=4,
+        )
+
+    assert blocking_config.mode == expected_mode

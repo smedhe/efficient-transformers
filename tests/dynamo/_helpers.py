@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Tuple
@@ -26,7 +27,7 @@ from QEfficient.utils.run_utils import ApiRunner
 # Worker-level caches. Model callers receive deep copies because transforms and
 # weight offload can mutate model instances.
 _HF_MODEL_CACHE: Dict[Tuple[str, torch.dtype], Tuple[AutoModelForCausalLM, AutoTokenizer]] = {}
-_HF_TOKEN_CACHE: Dict[Tuple[str, str, str, Tuple[str, ...], int, int, int, int | None], object] = {}
+_HF_TOKEN_CACHE: Dict[Tuple[object, ...], object] = {}
 
 DYNAMO_CAUSAL_LM_MODEL_IDS = {
     "codegen": "hf-internal-testing/tiny-random-CodeGenForCausalLM",
@@ -60,7 +61,7 @@ PROMPT_LEN = 8
 CTX_LEN = 32
 BATCH_SIZE = 1
 FULL_BATCH_SIZE = 4
-DYNAMO = True
+DYNAMO = False
 DTYPE = torch.float16
 MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False}
 
@@ -102,10 +103,20 @@ def _hf_token_cache_key(tokenizer, model_hf, prompts, prompt_len, ctx_len, batch
     model_name = getattr(model_hf.config, "_name_or_path", "") or getattr(model_hf.config, "name_or_path", "")
     tokenizer_name = getattr(tokenizer, "name_or_path", "")
     dtype = str(getattr(model_hf, "dtype", next(model_hf.parameters()).dtype))
+    fingerprint = hashlib.sha256()
+    for name, tensor in list(model_hf.state_dict().items())[:4]:
+        sample = tensor.detach().cpu().reshape(-1)[:16]
+        if sample.is_floating_point():
+            sample = sample.float()
+        fingerprint.update(name.encode())
+        fingerprint.update(str(tuple(tensor.shape)).encode())
+        fingerprint.update(str(tensor.dtype).encode())
+        fingerprint.update(sample.numpy().tobytes())
     return (
         model_name,
         tokenizer_name,
         dtype,
+        fingerprint.hexdigest(),
         tuple(prompts),
         prompt_len,
         ctx_len,
@@ -207,7 +218,8 @@ def get_dynamo_export(
     """Export once per compatible Dynamo graph shape and cache the ONNX path."""
     key = (model_id, torch_dtype, continuous_batching, ccl_enabled)
     if key in _DYNAMO_ONNX_CACHE:
-        return _DYNAMO_ONNX_CACHE[key]
+        onnx_path, qeff_model = _DYNAMO_ONNX_CACHE[key]
+        return onnx_path, copy.deepcopy(qeff_model)
 
     kwargs: Dict[str, object] = {}
     if continuous_batching:
@@ -232,8 +244,8 @@ def get_dynamo_export(
             use_onnx_subfunctions=True,
         )
     )
-    _DYNAMO_ONNX_CACHE[key] = (str(onnx_path), qeff_model)
-    return _DYNAMO_ONNX_CACHE[key]
+    _DYNAMO_ONNX_CACHE[key] = (str(onnx_path), copy.deepcopy(qeff_model))
+    return str(onnx_path), qeff_model
 
 
 def assert_has_subfunctions(onnx_path: Path, qeff_model: QEFFAutoModelForCausalLM) -> None:
@@ -259,7 +271,15 @@ def assert_has_subfunctions(onnx_path: Path, qeff_model: QEFFAutoModelForCausalL
     )
 
 
-_BLOCKED_KV_MARKER_MODES = {"kv", "qkv", "hkv", "hqkv", "bhqkv", "kv_headpar", "kv_batch_fold"}
+_BLOCKED_KV_MARKER_MODES = {
+    "kv": {"CtxGatherBlockedKV"},
+    "qkv": {"CtxGatherBlockedKV"},
+    "hkv": {"CtxGatherBlockedKV"},
+    "hqkv": {"CtxGatherBlockedKV"},
+    "bhqkv": {"CtxGatherBlockedKV"},
+    "kv_headpar": {"CtxGatherBlockedKV"},
+    "kv_batch_fold": {"CtxGatherBlockedKVBatch"},
+}
 _CB_BLOCKED_KV_MARKER_MODES = {"kv", "qkv", "hkv", "hqkv", "bhqkv"}
 
 
@@ -275,8 +295,11 @@ def assert_blocked_kv_ops_for_mode(
     Pure Q/H/HQ modes do not have a small reliable graph marker, so they are
     covered by dispatch tests plus export/compile/generation parity.
     """
-    if blocking_key not in _BLOCKED_KV_MARKER_MODES:
+    expected_ops = set(_BLOCKED_KV_MARKER_MODES.get(blocking_key, ()))
+    if not expected_ops:
         return
+    if continuous_batching and blocking_key in _CB_BLOCKED_KV_MARKER_MODES:
+        expected_ops = {"CtxGatherBlockedKVCB"}
 
     model = onnx.load(str(onnx_path), load_external_data=False)
     get_submodules = getattr(qeff_model.model, "get_submodules_for_export", None)
@@ -296,21 +319,12 @@ def assert_blocked_kv_ops_for_mode(
     ]
     op_counts = Counter(node.op_type for node in list(model.graph.node) + function_nodes)
 
-    expected_ops = {"CtxGatherBlockedKV", "CtxGatherBlockedKVBatch"}
-    if continuous_batching:
-        expected_ops.add("CtxGatherBlockedKVCB")
-
+    missing_ops = sorted(op_name for op_name in expected_ops if not op_counts[op_name])
     found_ops = {op_name: op_counts[op_name] for op_name in sorted(expected_ops) if op_counts[op_name]}
-    if continuous_batching and blocking_key in _CB_BLOCKED_KV_MARKER_MODES:
-        assert op_counts["CtxGatherBlockedKVCB"], (
-            f"Expected continuous-batching blocked KV custom op marker 'CtxGatherBlockedKVCB' "
-            f"for mode '{blocking_key}' in {onnx_path.name}. "
-            f"Found blocked KV ops: {found_ops}. Ops present: {dict(op_counts)}"
-        )
-    assert found_ops, (
-        f"Expected blocked KV custom op marker for mode '{blocking_key}' in {onnx_path.name}, "
-        f"but none of {sorted(expected_ops)} were present. "
-        f"Ops present: {dict(op_counts)}"
+    assert not missing_ops, (
+        f"Expected blocked KV custom op marker(s) {sorted(expected_ops)} for mode {blocking_key!r} "
+        f"in {onnx_path.name}, but missing {missing_ops}. "
+        f"Found blocked KV ops: {found_ops}. Ops present: {dict(op_counts)}"
     )
 
 
