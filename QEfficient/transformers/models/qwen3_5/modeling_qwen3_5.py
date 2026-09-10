@@ -857,7 +857,8 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             # Select based on seq_len
             # is_decode is SCALAR — torch.where broadcasts efficiently
             # HW predicates entire branch at runtime
-            seq_len_tensor = torch.full_like(position_ids[0, 0, 0], hidden_states.shape[1])
+            position_scalar = position_ids.reshape(-1)[0]
+            seq_len_tensor = torch.full_like(position_scalar, hidden_states.shape[1])
             is_decode = seq_len_tensor == torch.ones_like(seq_len_tensor)
 
             core_attn_out = torch.where(is_decode, recurrent_out, chunk_out)
