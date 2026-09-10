@@ -87,7 +87,7 @@ def build_dynamo_export_kwargs(export_kwargs):
     from QEfficient.utils import constants
 
     kwargs = dict(export_kwargs)
-    kwargs.setdefault("report", False)
+    kwargs.setdefault("report", True)
     kwargs.setdefault("optimize", False)
     kwargs["dynamo"] = True
     kwargs["opset_version"] = constants.ONNX_DYNAMO_EXPORT_OPSET
@@ -499,8 +499,6 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
             qeff_model._onnx_transforms.append(PreserveNestedCacheRetainedStateTransform)
         if RenameRepeatedSubgraphTransform not in qeff_model._onnx_transforms:
             qeff_model._onnx_transforms.append(RenameRepeatedSubgraphTransform)
-        if HoistFP8DequantFromSubfunctionTransform not in qeff_model._onnx_transforms:
-            qeff_model._onnx_transforms.append(HoistFP8DequantFromSubfunctionTransform)
     else:
         # TorchScript: RenameFunctionOutputsTransform + CustomOpTransform.
         if RenameFunctionOutputsTransform not in qeff_model._onnx_transforms:

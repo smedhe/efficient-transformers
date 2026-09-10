@@ -94,7 +94,6 @@ from QEfficient.utils import (
     validate_kv_cache_prefix,
 )
 from QEfficient.utils.check_ccl_specializations import process_ccl_specializations
-from QEfficient.utils.dtype_utils import cast_non_quantized_tensors
 from QEfficient.utils.export_utils import export_from_compile
 from QEfficient.utils.logging_utils import logger
 from QEfficient.utils.runtime_requirements import validate_dynamo_export_requirements
@@ -1583,7 +1582,6 @@ class _QEffAutoModelForImageTextToTextDualQPC:
 
         _resolve_torch_dtype(kwargs)
         model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
-        cast_non_quantized_tensors(model, kwargs.get("torch_dtype", torch.float32))
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
 
@@ -2864,7 +2862,6 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         config.vision_config.use_flash_attn = "false"
         _resolve_torch_dtype(kwargs)
         model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, config, *args, **kwargs)
-        cast_non_quantized_tensors(model, kwargs.get("torch_dtype", torch.float32))
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
 
@@ -3538,7 +3535,6 @@ class QEFFAutoModelForImageTextToText:
             model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
         else:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
-        cast_non_quantized_tensors(model, kwargs.get("torch_dtype", torch.float32))
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
 
@@ -3879,7 +3875,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
         else:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
-        cast_non_quantized_tensors(model, kwargs.get("torch_dtype", torch.float32))
         if qaic_config is not None:
             qaic_config["pretrained_model_name_or_path"] = pretrained_model_name_or_path
 

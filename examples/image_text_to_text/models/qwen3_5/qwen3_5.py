@@ -75,6 +75,7 @@ if skip_vision:
         split_model_io=True,
         use_onnx_subfunctions=True,
         qaic_config=qaic_config,
+        dynamo=True,
         # comp_ctx_lengths_prefill=comp_ctx_lengths_prefill,
         # comp_ctx_lengths_decode=comp_ctx_lengths_decode,
     )
@@ -148,6 +149,7 @@ else:
         split_model_io=True,
         use_onnx_subfunctions=True,
         qaic_config=qaic_config,
+        dynamo=True,
         # comp_ctx_lengths_prefill=comp_ctx_lengths_prefill,
         # comp_ctx_lengths_decode=comp_ctx_lengths_decode,
     )
