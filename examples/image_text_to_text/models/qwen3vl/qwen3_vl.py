@@ -13,7 +13,7 @@ from transformers import AutoConfig, AutoProcessor, TextStreamer
 
 from QEfficient import QEFFAutoModelForImageTextToText
 
-model_id = "Qwen/Qwen3-VL-32B-Instruct"
+model_id = "Qwen/Qwen3-VL-2B-Instruct"
 config = AutoConfig.from_pretrained(model_id)
 
 # config.vision_config.depth = 9
@@ -58,6 +58,7 @@ if skip_vision:
         skip_vision=True,
         mos=1,
         use_onnx_subfunctions=True,
+        dynamo=True,
         # comp_ctx_lengths_prefill=comp_ctx_lengths_prefill,
         # comp_ctx_lengths_decode=comp_ctx_lengths_decode,
     )
@@ -104,6 +105,7 @@ else:
         aic_enable_depth_first=True,
         mos=1,
         use_onnx_subfunctions=False,
+        dynamo=True,
         # comp_ctx_lengths_prefill=comp_ctx_lengths_prefill,
         # comp_ctx_lengths_decode=comp_ctx_lengths_decode,
     )
