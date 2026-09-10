@@ -15,11 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import pytest
 import torch
 from transformers import AutoModelForImageTextToText
 
 from QEfficient.blocking.attention_blocking import BlockingMode
+from QEfficient.generation.cloud_infer import QAICInferenceSession, is_retained_state_name
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
 
 from ._helpers import DYNAMO, assert_blocked_kv_ops_for_mode, exported_onnx_path
@@ -30,11 +32,10 @@ from .test_blocking_tiny_models import (
     NUM_KV_BLOCKS,
     NUM_Q_BLOCKS,
     VOCAB_SIZE_FLOOR,
+    _get_device_ids,
     _make_tiny_qwen3_vl_moe_config,
     _qaic_config,
 )
-
-pytestmark = pytest.mark.skip(reason="VLMs are not onboarded in the Dynamo blocking suite yet.")
 
 QWEN3_VL_MOE_PREFILL_LEN = 64
 QWEN3_VL_MOE_CTX_LEN = 512
@@ -150,6 +151,119 @@ def _assert_blocking_config(qeff_model: QEFFAutoModelForImageTextToText, case: V
         language_model = getattr(qeff_model.lang_model.model, "language_model", None)
         assert language_model is not None
         assert getattr(language_model, "mla_absorption", None) == expected_mla_absorption
+
+
+def _clone_tensor_tree(value):
+    if torch.is_tensor(value):
+        return value.clone()
+    if isinstance(value, list):
+        return [_clone_tensor_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_tensor_tree(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _clone_tensor_tree(item) for key, item in value.items()}
+    return copy.deepcopy(value)
+
+
+def _get_output_logits(outputs):
+    if hasattr(outputs, "logits"):
+        return outputs.logits
+    if isinstance(outputs, dict):
+        return outputs["logits"]
+    return outputs[0]
+
+
+def _make_dummy_lang_inputs(qeff_model: QEFFAutoModelForImageTextToText, case: VlmBlockingQaicCase):
+    dummy_inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        batch_size=case.batch_size,
+        prefill_seq_len=case.prompt_len,
+    )
+    return dummy_inputs["lang"]
+
+
+def _flatten_qaic_inputs(inputs: dict) -> dict[str, np.ndarray]:
+    flat_inputs = {}
+    for name, value in inputs.items():
+        if name == "past_key_values":
+            for layer_idx, layer_cache in enumerate(value):
+                flat_inputs[f"past_key.{layer_idx}"] = layer_cache[0].detach().cpu().numpy()
+                flat_inputs[f"past_value.{layer_idx}"] = layer_cache[1].detach().cpu().numpy()
+        elif name == "compressed_kvs":
+            for layer_idx, layer_cache in enumerate(value):
+                flat_inputs[f"compressed_kv.{layer_idx}"] = layer_cache[0].detach().cpu().numpy()
+                flat_inputs[f"k_pe.{layer_idx}"] = layer_cache[1].detach().cpu().numpy()
+        elif torch.is_tensor(value):
+            flat_inputs[name] = value.detach().cpu().numpy()
+    return flat_inputs
+
+
+def _session_input_names(session: QAICInferenceSession) -> set[str]:
+    input_names = set(session.input_names)
+    input_names.update(name.rsplit("/", 1)[-1] for name in session.input_names)
+    return input_names
+
+
+def _cast_for_session(session: QAICInferenceSession, name: str, value: np.ndarray) -> np.ndarray:
+    binding_index = session.binding_index_map.get(name)
+    if binding_index is None:
+        return value
+    dtype = session.aic_to_np_dtype_mapping[session.bindings[binding_index].type]
+    return value.astype(dtype, copy=False)
+
+
+def _filter_session_inputs(session: QAICInferenceSession, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    input_names = _session_input_names(session)
+    return {
+        name: _cast_for_session(session, name, value)
+        for name, value in inputs.items()
+        if name in input_names and not is_retained_state_name(name)
+    }
+
+
+def _set_logits_buffer(session: QAICInferenceSession, logits: np.ndarray):
+    binding_index = session.binding_index_map.get("logits")
+    if binding_index is None:
+        return
+    dtype = session.aic_to_np_dtype_mapping[session.bindings[binding_index].type]
+    session.set_buffers({"logits": np.zeros(logits.shape, dtype=dtype)})
+
+
+def _assert_logits_close(label: str, expected: np.ndarray, actual: np.ndarray, *, atol: float) -> None:
+    assert expected.shape == actual.shape, (
+        f"{label} logits shape mismatch: expected={expected.shape}, actual={actual.shape}"
+    )
+    diff = np.abs(expected - actual)
+    max_diff = float(diff.max())
+    if max_diff >= atol:
+        max_idx = np.unravel_index(np.argmax(diff), diff.shape)
+        assert False, (
+            f"{label} logits diverged: shape={expected.shape}, max_abs_diff={max_diff}, "
+            f"mean_abs_diff={float(diff.mean())}, max_diff_index={max_idx}, atol={atol}"
+        )
+
+
+@torch.no_grad()
+def _assert_lang_qpc_logits_parity(qeff_model: QEFFAutoModelForImageTextToText, case: VlmBlockingQaicCase):
+    lang_inputs = _make_dummy_lang_inputs(qeff_model, case)
+    qeff_outputs = qeff_model.lang_model.model(**_clone_tensor_tree(lang_inputs))
+    qeff_logits = _get_output_logits(qeff_outputs).detach().float().cpu().numpy()
+
+    session = QAICInferenceSession(str(qeff_model.lang_model.qpc_path), _get_device_ids(case))
+    session.skip_buffers(
+        [
+            name
+            for name in session.input_names + session.output_names
+            if is_retained_state_name(name) or name.endswith("_RetainedState")
+        ]
+    )
+    try:
+        _set_logits_buffer(session, qeff_logits)
+        qaic_outputs = session.run(_filter_session_inputs(session, _flatten_qaic_inputs(lang_inputs)))
+    finally:
+        session.deactivate()
+
+    _assert_logits_close(f"{_case_id(case)} QAIC vs QEff PyTorch", qeff_logits, qaic_outputs["logits"], atol=5e-2)
 
 
 QWEN3_VL_MOE_CASES = [
@@ -284,3 +398,4 @@ def test_dynamo_vlm_blocking_compile(case: VlmBlockingQaicCase, tmp_export_dir):
     onnx_path = exported_onnx_path(qeff_model.lang_model.onnx_path)
     if case.expected_onnx_marker_key is not None:
         assert_blocked_kv_ops_for_mode(onnx_path, qeff_model.lang_model, case.expected_onnx_marker_key)
+    _assert_lang_qpc_logits_parity(qeff_model, case)

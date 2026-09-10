@@ -61,8 +61,8 @@ PROMPT_LEN = 8
 CTX_LEN = 32
 BATCH_SIZE = 1
 FULL_BATCH_SIZE = 4
-DYNAMO = False
-DTYPE = torch.float16
+DYNAMO = True
+DTYPE = torch.float32
 MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False}
 
 
@@ -280,7 +280,7 @@ _BLOCKED_KV_MARKER_MODES = {
     "kv_headpar": {"CtxGatherBlockedKV"},
     "kv_batch_fold": {"CtxGatherBlockedKVBatch"},
 }
-_CB_BLOCKED_KV_MARKER_MODES = {"kv", "qkv", "hkv", "hqkv", "bhqkv"}
+_CB_BLOCKED_KV_MARKER_MODES = {"kv", "qkv", "hkv", "hqkv", "bhqkv", "kv_headpar"}
 
 
 def assert_blocked_kv_ops_for_mode(

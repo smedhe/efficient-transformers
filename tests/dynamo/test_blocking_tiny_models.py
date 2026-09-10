@@ -15,21 +15,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, LlamaConfig
 
 from QEfficient.blocking.attention_blocking import BlockingMode
+from QEfficient.generation.cloud_infer import QAICInferenceSession, is_retained_state_name
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
+from QEfficient.utils.generate_inputs import InputHandler
 
 from ._helpers import (
     DTYPE,
     DYNAMO,
     assert_blocked_kv_ops_for_mode,
-    assert_hf_hw_parity,
     exported_onnx_path,
-    get_hf_tokens,
 )
 
 VOCAB_SIZE_FLOOR = 512
@@ -85,9 +86,9 @@ def _make_tiny_llama_config(vocab_size: int):
     )
 
 
-def _make_tiny_glm4_moe_config(vocab_size: int):
+def _make_tiny_qwen3_moe_config(vocab_size: int):
     return AutoConfig.for_model(
-        "glm4_moe",
+        "qwen3_moe",
         max_position_embeddings=CTX_LEN_BLOCKING,
         num_hidden_layers=2,
         num_attention_heads=4,
@@ -96,13 +97,14 @@ def _make_tiny_glm4_moe_config(vocab_size: int):
         moe_intermediate_size=32,
         vocab_size=vocab_size,
         num_key_value_heads=2,
-        n_routed_experts=4,
+        num_experts=4,
         num_experts_per_tok=2,
-        first_k_dense_replace=0,
-        n_group=1,
-        topk_group=1,
+        decoder_sparse_step=1,
+        mlp_only_layers=[],
+        norm_topk_prob=True,
         head_dim=32,
         pad_token_id=0,
+        dtype="float32",
     )
 
 
@@ -197,19 +199,10 @@ def _case_id(case: BlockingQaicCase) -> str:
     return f"{case.model_label}-{mode}{suffix}"
 
 
-SKIP_CASE_IDS = {
-    "llama-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
-    "glm4_moe-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
-    "gpt_oss-hq-mdp": "num_kv_blocks is None in HQ blocked export path",
-}
-
-
 def _with_marks(case: BlockingQaicCase):
     marks = []
     if case.num_devices > 1:
         marks.append(pytest.mark.dynamo_multi_device)
-    if skip_reason := SKIP_CASE_IDS.get(_case_id(case)):
-        marks.append(pytest.mark.skip(reason=skip_reason))
     if case.xfail_reason:
         marks.append(pytest.mark.xfail(reason=case.xfail_reason))
     return pytest.param(case, marks=marks, id=_case_id(case))
@@ -291,7 +284,7 @@ QWEN3_VL_MOE_CB_SPECIAL_MODES = (_mode("kv_batch_fold", num_kv_blocks=NUM_KV_BLO
 
 STANDARD_MODEL_SPECS = (
     BlockingModelSpec("llama", _make_tiny_llama_config),
-    BlockingModelSpec("glm4_moe", _make_tiny_glm4_moe_config),
+    BlockingModelSpec("qwen3_moe", _make_tiny_qwen3_moe_config),
     BlockingModelSpec("gpt_oss", _make_tiny_gpt_oss_config),
 )
 
@@ -335,6 +328,7 @@ def _load_tokenizer():
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_MODEL_ID, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
     return tokenizer
 
 
@@ -367,7 +361,6 @@ def _compile_and_check_blocking(qeff_model, case: BlockingQaicCase, tmp_export_d
     compile_kwargs = {}
     if continuous_batching:
         compile_kwargs["full_batch_size"] = FULL_BATCH_SIZE
-
     qpc_path = qeff_model.compile(
         compile_dir=str(compile_dir),
         prefill_seq_len=case.prompt_len,
@@ -458,34 +451,268 @@ def _get_device_ids(case: BlockingQaicCase):
     return device_groups[0]
 
 
-def _assert_generate_parity(
-    case: BlockingQaicCase, qeff_model, model_hf, tokenizer, prompts, *, full_batch_size: int | None = None
-):
-    hf_tokens = get_hf_tokens(
-        tokenizer,
-        model_hf,
-        prompts,
-        prompt_len=case.prompt_len,
-        ctx_len=case.ctx_len,
-        batch_size=case.batch_size,
-        full_batch_size=full_batch_size,
-    )
-    output = qeff_model.generate(
+def _make_prefill_raw_inputs(tokenizer, prompts: list[str], prompt_len: int) -> dict[str, np.ndarray]:
+    inputs = tokenizer(prompts, return_tensors="np", padding="max_length", max_length=prompt_len)
+    inputs["position_ids"] = np.where(inputs.pop("attention_mask"), np.arange(prompt_len), -1)
+    inputs.pop("token_type_ids", None)
+    return inputs
+
+
+def _make_past_key_values(config, tokenizer, batch_size: int, ctx_len: int):
+    input_handler = InputHandler(
+        batch_size=batch_size,
         tokenizer=tokenizer,
-        prompts=prompts,
-        device_id=_get_device_ids(case),
+        config=config,
+        prompt=[],
+        prompt_len=0,
+        ctx_len=ctx_len,
+        full_batch_size=None,
+        dtype=DTYPE,
     )
-    assert output.generated_texts is not None
+    return tuple(
+        (
+            torch.zeros(input_handler._get_layer_cache_shape(layer_idx), dtype=DTYPE),
+            torch.zeros(input_handler._get_layer_cache_shape(layer_idx), dtype=DTYPE),
+        )
+        for layer_idx in range(input_handler.n_layer)
+    )
+
+
+def _make_prefill_torch_inputs(
+    case: BlockingQaicCase,
+    tokenizer,
+    prompts: list[str],
+    config,
+    *,
+    full_batch_size: int | None = None,
+    batch_index: int | None = None,
+    past_key_values=None,
+) -> dict[str, torch.Tensor]:
+    raw_inputs = _make_prefill_raw_inputs(tokenizer, prompts, case.prompt_len)
+    inputs = {key: torch.from_numpy(value) for key, value in raw_inputs.items()}
+    if past_key_values is None:
+        past_key_values = _make_past_key_values(config, tokenizer, full_batch_size or len(prompts), case.ctx_len)
+    inputs["past_key_values"] = past_key_values
+    inputs["use_cache"] = True
+    if batch_index is not None:
+        inputs["batch_index"] = torch.tensor([[batch_index]], dtype=torch.long)
+    return inputs
+
+
+def _make_unpadded_prefill_torch_inputs(
+    tokenizer,
+    prompt: str,
+    *,
+    past_key_values,
+    batch_index: int,
+) -> dict[str, torch.Tensor]:
+    inputs = tokenizer(prompt, return_tensors="pt")
+    inputs.pop("attention_mask", None)
+    inputs.pop("token_type_ids", None)
+    seq_len = inputs["input_ids"].shape[1]
+    inputs["position_ids"] = torch.arange(seq_len, dtype=torch.long).view(1, seq_len)
+    inputs["past_key_values"] = past_key_values
+    inputs["use_cache"] = True
+    inputs["batch_index"] = torch.tensor([[batch_index]], dtype=torch.long)
+    return inputs
+
+
+def _get_output_past_key_values(outputs):
+    if hasattr(outputs, "past_key_values"):
+        return outputs.past_key_values
+    return outputs["past_key_values"]
+
+
+@torch.no_grad()
+def _get_qeff_generation_logits_and_tokens(
+    case: BlockingQaicCase,
+    qeff_model,
+    tokenizer,
+    prompts: list[str],
+    *,
+    full_batch_size: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    gen_len = case.ctx_len - case.prompt_len
+    config = qeff_model.model.config
+
     if full_batch_size is not None:
-        assert len(output.generated_texts) == full_batch_size
-    assert_hf_hw_parity(
-        str(getattr(model_hf.config, "model_type", "tiny")),
-        hf_tokens,
-        output,
-        gen_len=case.ctx_len - case.prompt_len,
+        past_key_values = _make_past_key_values(config, tokenizer, full_batch_size, case.ctx_len)
+        prefill_logits = []
+        next_tokens = []
+        next_positions = []
+        for batch_idx, prompt in enumerate(prompts):
+            inputs = _make_unpadded_prefill_torch_inputs(
+                tokenizer,
+                prompt,
+                past_key_values=past_key_values,
+                batch_index=batch_idx,
+            )
+            outputs = qeff_model.model(**inputs)
+            past_key_values = _get_output_past_key_values(outputs)
+            prefill_logits.append(outputs.logits.detach().float().cpu().numpy())
+            next_tokens.append(outputs.logits.argmax(-1).detach().cpu())
+            next_positions.append(inputs["position_ids"].max(1, keepdim=True).values + 1)
+
+        logits = [np.concatenate(prefill_logits, axis=0)]
+        input_ids = torch.cat(next_tokens, dim=0).to(torch.long)
+        position_ids = torch.cat(next_positions, dim=0).to(torch.long)
+        batch_index = torch.arange(full_batch_size, dtype=torch.long).view(-1, 1)
+        for _ in range(1, gen_len):
+            outputs = qeff_model.model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                batch_index=batch_index,
+                use_cache=True,
+            )
+            past_key_values = _get_output_past_key_values(outputs)
+            logits.append(outputs.logits.detach().float().cpu().numpy())
+            input_ids = outputs.logits.argmax(-1).detach().to(torch.long)
+            position_ids = position_ids + 1
+        stacked_logits = np.concatenate(logits, axis=1)
+        return stacked_logits, stacked_logits.argmax(-1)
+
+    inputs = _make_prefill_torch_inputs(case, tokenizer, prompts, config)
+    outputs = qeff_model.model(**inputs)
+    past_key_values = _get_output_past_key_values(outputs)
+    logits = [outputs.logits.detach().float().cpu().numpy()]
+    input_ids = outputs.logits.argmax(-1).detach().to(torch.long)
+    position_ids = inputs["position_ids"].max(1, keepdim=True).values + 1
+    for _ in range(1, gen_len):
+        outputs = qeff_model.model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
+        past_key_values = _get_output_past_key_values(outputs)
+        logits.append(outputs.logits.detach().float().cpu().numpy())
+        input_ids = outputs.logits.argmax(-1).detach().to(torch.long)
+        position_ids = position_ids + 1
+    stacked_logits = np.concatenate(logits, axis=1)
+    return stacked_logits, stacked_logits.argmax(-1)
+
+
+@torch.no_grad()
+def _get_hf_generation_logits(model_hf, tokenizer, prompts: list[str], forced_tokens: np.ndarray) -> np.ndarray:
+    logits = []
+    for batch_idx, prompt in enumerate(prompts):
+        inputs = tokenizer(prompt, return_tensors="pt")
+        inputs.pop("token_type_ids", None)
+        input_ids = inputs["input_ids"]
+        prompt_logits = []
+        for token_idx in range(forced_tokens.shape[1]):
+            outputs = model_hf(input_ids=input_ids)
+            prompt_logits.append(outputs.logits[:, -1:, :].detach().float().cpu().numpy())
+            if token_idx + 1 < forced_tokens.shape[1]:
+                next_token = torch.tensor([[forced_tokens[batch_idx, token_idx]]], dtype=torch.long)
+                input_ids = torch.cat([input_ids, next_token], dim=1)
+        logits.append(np.concatenate(prompt_logits, axis=1))
+    return np.concatenate(logits, axis=0)
+
+
+def _get_qaic_generation_logits(
+    case: BlockingQaicCase,
+    qpc_path: Path,
+    config,
+    tokenizer,
+    prompts: list[str],
+    forced_tokens: np.ndarray,
+    *,
+    full_batch_size: int | None = None,
+) -> np.ndarray:
+    session = QAICInferenceSession(str(qpc_path), _get_device_ids(case))
+    session.skip_buffers([name for name in session.input_names + session.output_names if is_retained_state_name(name)])
+    try:
+        gen_len = forced_tokens.shape[1]
+        if full_batch_size is not None:
+            assert len(prompts) == full_batch_size
+            prefill_logits = []
+            position_ids = []
+            for batch_idx, prompt in enumerate(prompts):
+                inputs = _make_prefill_raw_inputs(tokenizer, [prompt], case.prompt_len)
+                inputs["batch_index"] = np.array(batch_idx, dtype=np.int64).reshape(1, 1)
+                session.set_buffers({"logits": np.zeros((1, 1, config.vocab_size), dtype=np.float32)})
+                outputs = session.run(inputs)
+                prefill_logits.append(outputs["logits"])
+                position_ids.append(inputs["position_ids"].max(1, keepdims=True) + 1)
+
+            logits = [np.concatenate(prefill_logits, axis=0)]
+            decode_position_ids = np.concatenate(position_ids, axis=0).astype(np.int64)
+            batch_index = np.arange(full_batch_size, dtype=np.int64).reshape(-1, 1)
+            for token_idx in range(1, gen_len):
+                decode_inputs = {
+                    "input_ids": forced_tokens[:, token_idx - 1].reshape(full_batch_size, 1).astype(np.int64),
+                    "position_ids": decode_position_ids,
+                    "batch_index": batch_index,
+                }
+                session.set_buffers({"logits": np.zeros((full_batch_size, 1, config.vocab_size), dtype=np.float32)})
+                outputs = session.run(decode_inputs)
+                logits.append(outputs["logits"])
+                decode_position_ids = decode_position_ids + 1
+            return np.concatenate(logits, axis=1)
+
+        inputs = _make_prefill_raw_inputs(tokenizer, prompts, case.prompt_len)
+        session.set_buffers({"logits": np.zeros((case.batch_size, 1, config.vocab_size), dtype=np.float32)})
+        outputs = session.run(inputs)
+        logits = [outputs["logits"]]
+        position_ids = inputs["position_ids"].max(1, keepdims=True) + 1
+        for token_idx in range(1, gen_len):
+            decode_inputs = {
+                "input_ids": forced_tokens[:, token_idx - 1].reshape(case.batch_size, 1).astype(np.int64),
+                "position_ids": position_ids.astype(np.int64),
+            }
+            session.set_buffers({"logits": np.zeros((case.batch_size, 1, config.vocab_size), dtype=np.float32)})
+            outputs = session.run(decode_inputs)
+            logits.append(outputs["logits"])
+            position_ids = position_ids + 1
+        return np.concatenate(logits, axis=1)
+    finally:
+        del session
+
+
+def _assert_logits_close(label: str, expected: np.ndarray, actual: np.ndarray, *, atol: float) -> None:
+    assert expected.shape == actual.shape
+    diff = np.abs(expected - actual)
+    max_diff = float(diff.max())
+    if max_diff >= atol:
+        max_idx = np.unravel_index(np.argmax(diff), diff.shape)
+        assert False, (
+            f"{label} logits diverged: shape={expected.shape}, max_abs_diff={max_diff}, "
+            f"mean_abs_diff={float(diff.mean())}, max_diff_index={max_idx}, atol={atol}"
+        )
+
+
+def _assert_generation_logits_parity(
+    case: BlockingQaicCase,
+    qeff_model,
+    qpc_path: Path,
+    model_hf,
+    tokenizer,
+    prompts,
+    *,
+    full_batch_size: int | None = None,
+):
+    qeff_logits, forced_tokens = _get_qeff_generation_logits_and_tokens(
+        case,
+        qeff_model,
+        tokenizer,
+        prompts,
         full_batch_size=full_batch_size,
-        context="tiny blocking",
     )
+    hf_logits = _get_hf_generation_logits(model_hf, tokenizer, prompts, forced_tokens)
+    _assert_logits_close("HF vs QEff PyTorch", hf_logits, qeff_logits, atol=1e-4)
+
+    qaic_logits = _get_qaic_generation_logits(
+        case,
+        qpc_path,
+        qeff_model.model.config,
+        tokenizer,
+        prompts,
+        forced_tokens,
+        full_batch_size=full_batch_size,
+    )
+    _assert_logits_close("QAIC vs QEff PyTorch", qeff_logits, qaic_logits, atol=5e-2)
 
 
 @pytest.mark.dynamo
@@ -496,9 +723,10 @@ def _assert_generate_parity(
 def test_dynamo_tiny_blocking_compile_and_generate(case, tmp_path_factory):
     artifact = _get_or_compile_blocking_artifact(case, tmp_path_factory, continuous_batching=False)
 
-    _assert_generate_parity(
+    _assert_generation_logits_parity(
         case,
         artifact.qeff_model,
+        artifact.qpc_path,
         artifact.model_hf,
         artifact.tokenizer,
         CB_PROMPTS[: case.batch_size],
@@ -513,9 +741,10 @@ def test_dynamo_tiny_blocking_compile_and_generate(case, tmp_path_factory):
 def test_dynamo_tiny_cb_blocking_compile_and_generate(case, tmp_path_factory):
     artifact = _get_or_compile_blocking_artifact(case, tmp_path_factory, continuous_batching=True)
 
-    _assert_generate_parity(
+    _assert_generation_logits_parity(
         case,
         artifact.qeff_model,
+        artifact.qpc_path,
         artifact.model_hf,
         artifact.tokenizer,
         CB_PROMPTS,

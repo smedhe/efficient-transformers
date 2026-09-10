@@ -168,7 +168,7 @@ def blocked_kv_attention_forward(
     position_ids = cache_kwargs.get("position_ids")
     if ctx_len is None:
         raise ValueError("`ctx_len` is required for blocked KV attention.")
-    num_kv_blocks = max(1, num_kv_blocks)
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
     kv_block_size = -(-ctx_len // num_kv_blocks)
     if hasattr(module, "config"):
         mask_dtype = module.config.dtype
@@ -278,7 +278,7 @@ def blocked_kv_attention_forward_decode_headpar_batch(
     num_kv_heads = num_heads // num_kv_groups
     BH = batch_size * num_kv_heads  # static at compile time
     position_ids = cache_kwargs.get("position_ids")
-    num_kv_blocks = max(1, num_kv_blocks)
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
     kv_block_size = -(-ctx_len // num_kv_blocks)
     current_position = position_ids.max(dim=-1).values
 
@@ -391,7 +391,7 @@ def blocked_kv_attention_forward_headpar_offline(
     position_ids = cache_kwargs.get("position_ids")
     num_kv_heads = num_heads // num_kv_groups
     split = configured_split
-    num_kv_blocks = max(1, num_kv_blocks)
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
     kv_block_size = -(-past_seen_tokens // num_kv_blocks)
     current_position = position_ids.max(dim=-1).values
 
@@ -550,7 +550,7 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
     num_kv_groups = getattr(module, "num_key_value_groups", None)
     num_kv_heads = num_heads // num_kv_groups
     split = configured_split
-    num_kv_blocks = max(1, num_kv_blocks)
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
     kv_block_size = -(-ctx_len // num_kv_blocks)
     n_rep_chunk = num_kv_groups
     ql_chunk = -(-ctx_len // num_q_blocks)
@@ -700,7 +700,7 @@ def blocked_qkv_attention_forward_prefill_online(
     kv_repeat = num_cores // Hkv
     n_rep_per_core = NQH // num_cores
     skip_kv = kwargs.get("skip_kv", False)
-    num_kv_blocks = max(1, num_kv_blocks)
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
     kv_block_size = -(-ctx_len // num_kv_blocks)
     ql_chunk = -(-QL // num_q_blocks)
     position_ids = cache_kwargs.get("position_ids")
@@ -813,7 +813,7 @@ def blocked_kv_attention_forward_prefill_headpar_offline(
     kv_lora_rank = module.head_dim
     num_kv_groups = getattr(module, "num_key_value_groups", None)
     split = configured_split
-    num_kv_blocks = max(1, num_kv_blocks)
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
     n_rep = num_kv_groups
     Hkv = NQH // num_kv_groups
     n_rep_chunk = n_rep
@@ -1063,9 +1063,9 @@ def blocked_qkv_attention_forward(
         use_causal_mask = True
     position_ids = cache_kwargs.get("position_ids")
 
-    num_q_blocks = max(1, num_q_blocks) if num_q_blocks else 1
+    num_q_blocks = max(1, num_q_blocks) if num_q_blocks is not None else 1
     q_block_positions = [-(-i * seq_len) // num_q_blocks for i in range(num_q_blocks)]
-    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks else 1
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
     kv_block_size = -(-past_seen_tokens // num_kv_blocks)
 
     q_output_blocks = []
@@ -1213,10 +1213,10 @@ def blocked_hqkv_attention_forward(
     if head_block_size <= 0:
         head_block_size = num_heads
     num_head_blocks = math.ceil(num_heads / head_block_size)
-    num_q_blocks = max(1, num_q_blocks) if num_q_blocks else 1
+    num_q_blocks = max(1, num_q_blocks) if num_q_blocks is not None else 1
     q_block_positions = [-(-i * seq_len) // num_q_blocks for i in range(num_q_blocks)]
-    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks else 1
-    kv_block_size = -(-past_seen_tokens // num_kv_blocks) if num_kv_blocks else 1
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
+    kv_block_size = -(-past_seen_tokens // num_kv_blocks) if num_kv_blocks is not None else 1
 
     h_output_blocks = []
     h_attn_blocks = []
@@ -1385,7 +1385,7 @@ def blocked_bhqkv_attention_forward(
     num_head_blocks = math.ceil(num_heads / head_block_size)
     num_q_blocks = max(1, _normalize_int(num_q_blocks))
     q_block_positions = [-(-i * seq_len) // num_q_blocks for i in range(num_q_blocks)]
-    num_kv_blocks = max(1, num_kv_blocks)
+    num_kv_blocks = max(1, num_kv_blocks) if num_kv_blocks is not None else 1
     kv_block_size = -(-past_seen_tokens // num_kv_blocks)
 
     h_output_blocks = []
@@ -1728,7 +1728,7 @@ def blocked_kv_mla_attention_forward(
     current_denominator = torch.zeros(batch_size, num_heads, seq_len, device=query.device, dtype=query.dtype)
 
     ctx_len = compressed_kvs.layers[layer_idx].ckv.shape[2]
-    kv_block_size = -(-ctx_len // num_kv_blocks)
+    kv_block_size = -(-ctx_len // num_kv_blocks) if num_kv_blocks is not None else 1
 
     position_ids = cache_kwargs.get("position_ids")
     current_position = position_ids.max(dim=-1).values
