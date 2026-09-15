@@ -1672,7 +1672,7 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
             ctx_indices = ctx_indices.expand(batch, num_kv_heads, ctx_indices.shape[-1])
             v_out = ctx_gather_blocked_kv(v_out, ctx_indices)
 
-        v_out = torch.where(invalid_mask.unsqueeze(-1), torch.tensor(0.0, dtype=torch.float32), v_out)
+        v_out = torch.where(invalid_mask.unsqueeze(-1), torch.zeros_like(v_out, dtype=v_out.dtype), v_out)
         return v_out
 
     def update(

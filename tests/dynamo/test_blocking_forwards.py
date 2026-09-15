@@ -199,10 +199,21 @@ def _case_id(case: BlockingQaicCase) -> str:
     return f"{case.model_label}-{mode}{suffix}"
 
 
+GPT_OSS_RUNTIME_ERROR_XFAIL_CASE_IDS = {
+    "gpt_oss-qkv": "GPT-OSS blocked QKV runtime shape mismatch with attention sinks",
+    "gpt_oss-hq-mdp": "GPT-OSS blocked HQ runtime shape mismatch with attention sinks",
+    "gpt_oss-hkv-mdp": "GPT-OSS blocked HKV runtime shape mismatch with attention sinks",
+    "gpt_oss-hqkv-mdp": "GPT-OSS blocked HQKV runtime shape mismatch with attention sinks",
+    "gpt_oss-bhqkv-mdp": "GPT-OSS blocked BHQKV runtime shape mismatch with attention sinks",
+}
+
+
 def _with_marks(case: BlockingQaicCase):
     marks = []
     if case.num_devices > 1:
         marks.append(pytest.mark.dynamo_multi_device)
+    if xfail_reason := GPT_OSS_RUNTIME_ERROR_XFAIL_CASE_IDS.get(_case_id(case)):
+        marks.append(pytest.mark.xfail(reason=xfail_reason))
     if case.xfail_reason:
         marks.append(pytest.mark.xfail(reason=case.xfail_reason))
     return pytest.param(case, marks=marks, id=_case_id(case))

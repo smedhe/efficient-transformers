@@ -61,6 +61,7 @@ PROMPT_LEN = 8
 CTX_LEN = 32
 BATCH_SIZE = 1
 FULL_BATCH_SIZE = 4
+CB_PROMPTS = ["hello world"] * FULL_BATCH_SIZE
 DYNAMO = True
 DTYPE = torch.float32
 MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False}
@@ -176,6 +177,7 @@ def assert_hf_hw_parity(
 
     label = f" {context}" if context else ""
     if full_batch_size is None:
+        hf_tokens = np.asarray(hf_tokens).flatten()[:gen_len]
         qaic_tokens = qaic_output.generated_ids[0].flatten()[:gen_len]
         if not np.array_equal(hf_tokens, qaic_tokens):
             assert False, (

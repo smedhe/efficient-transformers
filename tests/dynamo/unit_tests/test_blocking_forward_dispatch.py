@@ -109,7 +109,7 @@ def _make_tiny_gpt_oss():
     cfg = GptOssConfig(
         num_hidden_layers=2,
         num_attention_heads=4,
-        num_key_value_heads=4,
+        num_key_value_heads=2,
         hidden_size=128,
         intermediate_size=128,
         head_dim=32,

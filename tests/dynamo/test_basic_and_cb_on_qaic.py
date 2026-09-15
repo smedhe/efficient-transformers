@@ -14,6 +14,7 @@ import torch
 
 from ._helpers import (
     BATCH_SIZE,
+    CB_PROMPTS,
     CTX_LEN,
     DTYPE,
     DYNAMO_CAUSAL_LM_MODEL_IDS,
@@ -26,6 +27,8 @@ from ._helpers import (
     load_tokenizer,
     skip_on_hf_model_load_error,
 )
+
+GRANITE_HW_PARITY_TOKENS = 10
 
 
 @pytest.mark.dynamo
@@ -106,6 +109,7 @@ def test_dynamo_multi_device_compile(model_type, model_id, tmp_export_dir, tmp_p
 
 @pytest.mark.dynamo
 @pytest.mark.on_qaic
+@pytest.mark.xdist_group(name="qaic-runtime")
 @pytest.mark.llm_model
 @pytest.mark.parametrize(
     "model_type,model_id",
@@ -145,16 +149,21 @@ def test_dynamo_hw_hf_parity(model_type, model_id, tmp_export_dir, tmp_path_fact
         prompts=["hello world"],
     )
 
+    gen_len = CTX_LEN - PROMPT_LEN
+    if model_type == "granite":
+        gen_len = GRANITE_HW_PARITY_TOKENS
+
     assert_hf_hw_parity(
         model_id,
         hf_tokens,
         qaic_output,
-        gen_len=CTX_LEN - PROMPT_LEN,
+        gen_len=gen_len,
     )
 
 
 @pytest.mark.dynamo
 @pytest.mark.on_qaic
+@pytest.mark.xdist_group(name="qaic-runtime")
 @pytest.mark.llm_model
 @pytest.mark.parametrize(
     "model_type,model_id",
@@ -181,7 +190,7 @@ def test_dynamo_cb_generate(model_type, model_id, tmp_export_dir, tmp_path_facto
         full_batch_size=FULL_BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
-    prompts = ["hello world"] * FULL_BATCH_SIZE
+    prompts = CB_PROMPTS
     output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=prompts,

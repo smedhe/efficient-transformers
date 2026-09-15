@@ -435,9 +435,14 @@ def blocked_kv_attention_forward_headpar_offline(
             valid_in_chunk = kv_len_block - chunk_start
             key_idx = torch.arange(split_block_len, device=query.device)
             pad_mask = key_idx.unsqueeze(0) >= valid_in_chunk.unsqueeze(1)
-            attn_weights_block = attn_weights_block.masked_fill(
-                pad_mask.view(1, 1, split, 1, split_block_len), HEADPAR_MASKED_ATTENTION_VALUE
+            pad_mask = pad_mask.view(1, 1, split, 1, split_block_len)
+            masked_tensor = torch.full_like(
+                attn_weights_block,
+                HEADPAR_MASKED_ATTENTION_VALUE,
+                dtype=attn_weights_block.dtype,
+                device=attn_weights_block.device,
             )
+            attn_weights_block = torch.where(pad_mask, masked_tensor, attn_weights_block)
 
         split_causal_masks = []
         for s in range(split):
@@ -458,12 +463,21 @@ def blocked_kv_attention_forward_headpar_offline(
             split_causal_masks.append(mask_s)
         causal_mask = torch.stack(split_causal_masks, dim=2)  # [B, 1, split, G*Q, split_block_len]
 
-        attn_weights_block = attn_weights_block.masked_fill(causal_mask, HEADPAR_MASKED_ATTENTION_VALUE)
+        masked_tensor = torch.full_like(
+            attn_weights_block,
+            HEADPAR_MASKED_ATTENTION_VALUE,
+            dtype=attn_weights_block.dtype,
+            device=attn_weights_block.device,
+        )
+        attn_weights_block = torch.where(causal_mask, masked_tensor, attn_weights_block)
 
         max_block = attn_weights_block.max(dim=-1).values
         exp_block = torch.exp(attn_weights_block - max_block.unsqueeze(-1))
         if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
-            max_block = torch.where(skip_future, torch.full_like(max_block, HEADPAR_MASKED_ATTENTION_VALUE), max_block)
+            skipped_max = torch.full_like(
+                max_block, HEADPAR_MASKED_ATTENTION_VALUE, dtype=max_block.dtype, device=max_block.device
+            )
+            max_block = torch.where(skip_future, skipped_max, max_block)
             exp_block = torch.where(skip_future, torch.zeros_like(exp_block), exp_block)
 
         v_block = past_key_value.read_only_blocked_V(start_index, end_index, layer_idx, cache_kwargs)

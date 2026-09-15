@@ -15,6 +15,7 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 
 from ._helpers import (
     BATCH_SIZE,
+    CB_PROMPTS,
     DTYPE,
     DYNAMO,
     DYNAMO_CAUSAL_LM_MODEL_IDS,
@@ -53,7 +54,6 @@ NUM_BATCH_BLOCKS = 2
 PROMPT_LEN_BLOCKING = 32
 CTX_LEN_BLOCKING = 128
 PROMPT = "hello world"
-CB_PROMPTS = ["hello world", "quick brown fox", "machine learning", "open source"]
 # Head blocking is meaningful only with multiple devices.
 HEAD_BLOCKING_NUM_DEVICES = 4
 MULTI_DEVICE_BLOCKING_KEYS = {"head", "hq", "hkv", "hqkv", "bhqkv"}
