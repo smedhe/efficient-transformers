@@ -85,9 +85,9 @@ def _build_config(model_id: str):
     config.torch_dtype = torch.float16
 
     # For faster execution user can run with fewer layers. For testing purposes only.
-    # config.vision_config.depth = 9
-    # config.text_config.num_hidden_layers = 2
-    # config.vision_config.deepstack_visual_indexes = [8]
+    config.vision_config.depth = 9
+    config.text_config.num_hidden_layers = 2
+    config.vision_config.deepstack_visual_indexes = [8]
     return config
 
 
@@ -155,8 +155,7 @@ def run(
         config=config,
         dtype=torch.float16,
         layerwise=False,
-        weight_free=True,
-        num_hidden_layers=5,
+        weight_free=False,
     )
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
     processor = AutoProcessor.from_pretrained(model_id)
@@ -177,6 +176,7 @@ def run(
             "split_model_io": True,
             "skip_lang": True,
             "use_onnx_subfunctions": True,
+            "dynamo": True,
             "offload_pt_weights": False,
             "layerwise": False,
         }
@@ -209,8 +209,9 @@ def run(
         "prefill_only": False,
         "skip_vision": True,
         "use_onnx_subfunctions": True,
+        "dynamo": True,
         "layerwise": False,
-        "offload_pt_weights": False,
+        "offload_pt_weights": True,
         "qaic_config": _decode_qaic_config(ctx_len, num_kv_blocks),
     }
     print(f">>>>>>>>>>>>>>>>>>>>> decode_compile_kwargs: {decode_compile_kwargs}")

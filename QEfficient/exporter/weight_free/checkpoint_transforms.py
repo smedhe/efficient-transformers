@@ -229,6 +229,99 @@ class _LayerStacker:
         }
 
 
+def _is_expert_parallel_prefill_checkpoint(kwargs: dict) -> bool:
+    hash_params = kwargs.get("hash_params") or {}
+    flavour = hash_params.get("moe_prefill_flavour")
+    if hasattr(flavour, "value"):
+        flavour = flavour.value
+    return flavour == "expert_parallel"
+
+
+def _expert_parallel_checkpoint_layout(kwargs: dict) -> Optional[Tuple[int, int]]:
+    if not _is_expert_parallel_prefill_checkpoint(kwargs):
+        return None
+    hash_params = kwargs.get("hash_params") or {}
+    num_pipeline_stages = hash_params.get("moe_prefill_num_pipeline_stages")
+    num_parallelized_experts = hash_params.get("moe_prefill_num_parallelized_experts")
+    if num_pipeline_stages is None or num_parallelized_experts is None:
+        return None
+    return int(num_pipeline_stages), int(num_parallelized_experts)
+
+
+def _pack_expert_parallel_checkpoint_tensor(
+    key: str,
+    tensor: torch.Tensor,
+    *,
+    num_pipeline_stages: int,
+    num_parallelized_experts: int,
+) -> torch.Tensor:
+    if tensor.ndim == 4:
+        return tensor.contiguous()
+    if tensor.shape[0] != num_pipeline_stages * num_parallelized_experts:
+        raise ValueError(
+            f"Cannot pack {key}: first dimension {tensor.shape[0]} does not match "
+            f"num_pipeline_stages * num_parallelized_experts "
+            f"({num_pipeline_stages} * {num_parallelized_experts})."
+        )
+    return tensor.view(num_pipeline_stages, num_parallelized_experts, *tensor.shape[1:]).transpose(0, 1).contiguous()
+
+
+class MoEExpertParallelCheckpointTransform(BaseCheckpointTransform):
+    """Pack canonical MoE checkpoint tensors for expert-parallel prefill export."""
+
+    MOE_WEIGHTS_RE = re.compile(r"^(.+\.moe_weights)\.(gate|up|down|gate_bias|up_bias|down_bias)$")
+
+    @classmethod
+    def is_applicable(cls, weight_map: Dict[str, str], **kwargs) -> bool:
+        layout = _expert_parallel_checkpoint_layout(kwargs)
+        return layout is not None and any(cls.MOE_WEIGHTS_RE.match(key) for key in weight_map)
+
+    @classmethod
+    def apply(
+        cls,
+        src: Path,
+        out: Path,
+        target_dtype: torch.dtype = torch.float32,
+        **kwargs,
+    ) -> bool:
+        layout = _expert_parallel_checkpoint_layout(kwargs)
+        if layout is None:
+            return False
+        num_pipeline_stages, num_parallelized_experts = layout
+
+        sentinel = out / _SENTINEL
+        if sentinel.exists():
+            logger.info("MoEExpertParallelCheckpointTransform: prepared checkpoint exists, skipping.")
+            return False
+
+        out.mkdir(parents=True, exist_ok=True)
+        copy_checkpoint_aux_files(src, out)
+
+        weight_map = read_weight_map(src)
+        new_weight_map: Dict[str, str] = {}
+        for shard_name in sorted(set(weight_map.values())):
+            tensors: Dict[str, torch.Tensor] = {}
+            with safe_open(str(src / shard_name), framework="pt") as f:
+                for key in f.keys():
+                    tensor = f.get_tensor(key)
+                    tensor = tensor.to(target_dtype) if tensor.is_floating_point() else tensor
+                    if cls.MOE_WEIGHTS_RE.match(key):
+                        tensor = _pack_expert_parallel_checkpoint_tensor(
+                            key,
+                            tensor,
+                            num_pipeline_stages=num_pipeline_stages,
+                            num_parallelized_experts=num_parallelized_experts,
+                        )
+                    tensors[key] = tensor
+                    new_weight_map[key] = shard_name
+            save_file({key: tensor.contiguous() for key, tensor in tensors.items()}, str(out / shard_name))
+
+        write_index(out, new_weight_map)
+        sentinel.touch()
+        logger.info(f"MoEExpertParallelCheckpointTransform: done → {out}")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Transform 2: MoE expert stacking
 # ---------------------------------------------------------------------------

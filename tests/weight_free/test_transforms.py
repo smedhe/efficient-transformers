@@ -55,6 +55,7 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
     ExpertParallelPackingCheckpointTransform,
     GptOssMxfp4ExpertDequantSplitCheckpointTransform,
     GraniteMoeFusedExpertSplitCheckpointTransform,
+    MoEExpertParallelCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
 )

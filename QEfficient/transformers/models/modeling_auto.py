@@ -1147,6 +1147,7 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
     _onnx_transforms = []
 
     _checkpoint_transforms = [
+        MoEExpertParallelCheckpointTransform,
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
@@ -1296,6 +1297,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
     _onnx_transforms = []
 
     _checkpoint_transforms = [
+        MoEExpertParallelCheckpointTransform,
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
@@ -3653,6 +3655,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
     _onnx_transforms = []
 
     _checkpoint_transforms = [
+        MoEExpertParallelCheckpointTransform,
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
