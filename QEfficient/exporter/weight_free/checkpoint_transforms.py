@@ -313,6 +313,99 @@ class _LayerStacker:
         }
 
 
+def _is_expert_parallel_prefill_checkpoint(kwargs: dict) -> bool:
+    hash_params = kwargs.get("hash_params") or {}
+    flavour = hash_params.get("moe_prefill_flavour")
+    if hasattr(flavour, "value"):
+        flavour = flavour.value
+    return flavour == "expert_parallel"
+
+
+def _expert_parallel_checkpoint_layout(kwargs: dict) -> Optional[Tuple[int, int]]:
+    if not _is_expert_parallel_prefill_checkpoint(kwargs):
+        return None
+    hash_params = kwargs.get("hash_params") or {}
+    num_pipeline_stages = hash_params.get("moe_prefill_num_pipeline_stages")
+    num_parallelized_experts = hash_params.get("moe_prefill_num_parallelized_experts")
+    if num_pipeline_stages is None or num_parallelized_experts is None:
+        return None
+    return int(num_pipeline_stages), int(num_parallelized_experts)
+
+
+def _pack_expert_parallel_checkpoint_tensor(
+    key: str,
+    tensor: torch.Tensor,
+    *,
+    num_pipeline_stages: int,
+    num_parallelized_experts: int,
+) -> torch.Tensor:
+    if tensor.ndim == 4:
+        return tensor.contiguous()
+    if tensor.shape[0] != num_pipeline_stages * num_parallelized_experts:
+        raise ValueError(
+            f"Cannot pack {key}: first dimension {tensor.shape[0]} does not match "
+            f"num_pipeline_stages * num_parallelized_experts "
+            f"({num_pipeline_stages} * {num_parallelized_experts})."
+        )
+    return tensor.view(num_pipeline_stages, num_parallelized_experts, *tensor.shape[1:]).transpose(0, 1).contiguous()
+
+
+class MoEExpertParallelCheckpointTransform(BaseCheckpointTransform):
+    """Pack canonical MoE checkpoint tensors for expert-parallel prefill export."""
+
+    MOE_WEIGHTS_RE = re.compile(r"^(.+\.moe_weights)\.(gate|up|down|gate_bias|up_bias|down_bias)$")
+
+    @classmethod
+    def is_applicable(cls, weight_map: Dict[str, str], **kwargs) -> bool:
+        layout = _expert_parallel_checkpoint_layout(kwargs)
+        return layout is not None and any(cls.MOE_WEIGHTS_RE.match(key) for key in weight_map)
+
+    @classmethod
+    def apply(
+        cls,
+        src: Path,
+        out: Path,
+        target_dtype: torch.dtype = torch.float32,
+        **kwargs,
+    ) -> bool:
+        layout = _expert_parallel_checkpoint_layout(kwargs)
+        if layout is None:
+            return False
+        num_pipeline_stages, num_parallelized_experts = layout
+
+        sentinel = out / _SENTINEL
+        if sentinel.exists():
+            logger.info("MoEExpertParallelCheckpointTransform: prepared checkpoint exists, skipping.")
+            return False
+
+        out.mkdir(parents=True, exist_ok=True)
+        copy_checkpoint_aux_files(src, out)
+
+        weight_map = read_weight_map(src)
+        new_weight_map: Dict[str, str] = {}
+        for shard_name in sorted(set(weight_map.values())):
+            tensors: Dict[str, torch.Tensor] = {}
+            with safe_open(str(src / shard_name), framework="pt") as f:
+                for key in f.keys():
+                    tensor = f.get_tensor(key)
+                    tensor = tensor.to(target_dtype) if tensor.is_floating_point() else tensor
+                    if cls.MOE_WEIGHTS_RE.match(key):
+                        tensor = _pack_expert_parallel_checkpoint_tensor(
+                            key,
+                            tensor,
+                            num_pipeline_stages=num_pipeline_stages,
+                            num_parallelized_experts=num_parallelized_experts,
+                        )
+                    tensors[key] = tensor
+                    new_weight_map[key] = shard_name
+            save_file({key: tensor.contiguous() for key, tensor in tensors.items()}, str(out / shard_name))
+
+        write_index(out, new_weight_map)
+        sentinel.touch()
+        logger.info(f"MoEExpertParallelCheckpointTransform: done → {out}")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Transform 2: MoE expert stacking + dtype conversion — single pass
 # ---------------------------------------------------------------------------
@@ -806,6 +899,19 @@ class MoEFusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
         if not cls.is_applicable(weight_map):
             return False
 
+        expert_parallel_layout = _expert_parallel_checkpoint_layout(kwargs)
+
+        def _maybe_pack(key: str, tensor: torch.Tensor) -> torch.Tensor:
+            if expert_parallel_layout is None:
+                return tensor
+            num_pipeline_stages, num_parallelized_experts = expert_parallel_layout
+            return _pack_expert_parallel_checkpoint_tensor(
+                key,
+                tensor,
+                num_pipeline_stages=num_pipeline_stages,
+                num_parallelized_experts=num_parallelized_experts,
+            )
+
         out.mkdir(parents=True, exist_ok=True)
         copy_checkpoint_aux_files(src, out)
 
@@ -850,8 +956,8 @@ class MoEFusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
                             interleaved=split_dim == 2 and preferred_split_dim == 2,
                             preferred_split_dim=split_dim,
                         )
-                        out_tensors[f"{moe_prefix}.gate"] = gate
-                        out_tensors[f"{moe_prefix}.up"] = up
+                        out_tensors[f"{moe_prefix}.gate"] = _maybe_pack(f"{moe_prefix}.gate", gate)
+                        out_tensors[f"{moe_prefix}.up"] = _maybe_pack(f"{moe_prefix}.up", up)
                         new_weight_map[f"{moe_prefix}.gate"] = shard_name
                         new_weight_map[f"{moe_prefix}.up"] = shard_name
                         # Keep original for completeness
@@ -867,11 +973,12 @@ class MoEFusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
                             tuple(tensor.shape),
                             preferred_split_dim=preferred_split_dim,
                         )
-                        out_tensors[f"{moe_prefix}.down"] = _down_to_canonical(
+                        down = _down_to_canonical(
                             tensor,
                             gate_up_shape,
                             preferred_split_dim=split_dim,
                         )
+                        out_tensors[f"{moe_prefix}.down"] = _maybe_pack(f"{moe_prefix}.down", down)
                         new_weight_map[f"{moe_prefix}.down"] = shard_name
                         out_tensors[key] = tensor
                         new_weight_map[key] = shard_name
@@ -884,8 +991,8 @@ class MoEFusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
                             preferred_split_dim=2,
                         )
                         gate_bias, up_bias = _split_gate_up_bias(tensor, interleaved=split_dim == 2)
-                        out_tensors[f"{moe_prefix}.gate_bias"] = gate_bias
-                        out_tensors[f"{moe_prefix}.up_bias"] = up_bias
+                        out_tensors[f"{moe_prefix}.gate_bias"] = _maybe_pack(f"{moe_prefix}.gate_bias", gate_bias)
+                        out_tensors[f"{moe_prefix}.up_bias"] = _maybe_pack(f"{moe_prefix}.up_bias", up_bias)
                         new_weight_map[f"{moe_prefix}.gate_bias"] = shard_name
                         new_weight_map[f"{moe_prefix}.up_bias"] = shard_name
                         out_tensors[key] = tensor
@@ -893,7 +1000,7 @@ class MoEFusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
                     elif down_bias_m:
                         prefix = down_bias_m.group(1)
                         moe_prefix = _moe_weights_prefix_from_experts_prefix(prefix)
-                        out_tensors[f"{moe_prefix}.down_bias"] = tensor.clone()
+                        out_tensors[f"{moe_prefix}.down_bias"] = _maybe_pack(f"{moe_prefix}.down_bias", tensor.clone())
                         new_weight_map[f"{moe_prefix}.down_bias"] = shard_name
                         out_tensors[key] = tensor
                         new_weight_map[key] = shard_name

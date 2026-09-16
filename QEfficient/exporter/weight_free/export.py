@@ -136,6 +136,21 @@ def _prune_unused_fake_initializers(onnx_program) -> None:
             del initializers[name]
 
 
+def _expert_parallel_checkpoint_suffix(qeff_model) -> str:
+    hash_params = getattr(qeff_model, "hash_params", {}) or {}
+    flavour = hash_params.get("moe_prefill_flavour")
+    if hasattr(flavour, "value"):
+        flavour = flavour.value
+    if flavour != "expert_parallel":
+        return ""
+
+    num_parallelized_experts = hash_params.get("moe_prefill_num_parallelized_experts")
+    num_pipeline_stages = hash_params.get("moe_prefill_num_pipeline_stages")
+    if num_parallelized_experts is None or num_pipeline_stages is None:
+        return ""
+    return f"-moe-expert-parallel-{num_parallelized_experts}x{num_pipeline_stages}"
+
+
 def _prepare_checkpoint_for_weight_free_export(
     qeff_model,
     model_ref: str,
@@ -164,7 +179,7 @@ def _prepare_checkpoint_for_weight_free_export(
     dtype_suffix = str(target_dtype).replace("torch.", "")
     # TODO(wf): For different flavours of the model that expect different checkpoint weight layouts,
     # we end up overriding old one. We need to add support of hashing/caching here.
-    prepared_name = source_dir.name + f"-qeff-prepared-{dtype_suffix}"
+    prepared_name = source_dir.name + f"-qeff-prepared-{dtype_suffix}{_expert_parallel_checkpoint_suffix(qeff_model)}"
     if QEFF_CHECKPOINT_HOME:
         prepared_out = QEFF_CHECKPOINT_HOME.expanduser() / prepared_name
     else:
@@ -175,6 +190,7 @@ def _prepare_checkpoint_for_weight_free_export(
             src=source_dir,
             out=prepared_out,
             target_dtype=target_dtype,
+            hash_params=dict(getattr(qeff_model, "hash_params", {}) or {}),
         )
     )
 
