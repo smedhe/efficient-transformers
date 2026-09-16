@@ -1089,6 +1089,40 @@ class TestWeightFreeCheckpointTransforms:
         assert spec.inputs[0].name == "model.embed_tokens.weight"
         assert spec.inputs[0].location.key == "model.embed_tokens.weight"
 
+    def test_promotes_aliased_vision_model_initializer(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        src.mkdir()
+        weight = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        _write_safetensors_checkpoint(src, {"model.visual.weight": weight})
+
+        class AliasedVisionModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = torch.nn.Module()
+                self.model.visual = torch.nn.Linear(2, 2, bias=False)
+                self.model.vision_model = self.model.visual
+
+        initializer = SimpleNamespace(shape=weight.shape, dtype=ir.DataType.FLOAT)
+        graph = SimpleNamespace(initializers={"model.vision_model.weight": initializer}, inputs=[])
+        onnx_program = SimpleNamespace(model=SimpleNamespace(graph=graph))
+        monkeypatch.setattr(
+            checkpoint_key_resolver.ir,
+            "Value",
+            lambda name, shape, type: SimpleNamespace(name=name, shape=shape, type=type),
+        )
+
+        spec = checkpoint_key_resolver.promote_initializers_and_build_spec(
+            onnx_program=onnx_program,
+            model_ref=str(src),
+            model_name="tiny-vision-alias",
+            qeff_model=SimpleNamespace(model=AliasedVisionModel()),
+        )
+
+        assert "model.vision_model.weight" not in graph.initializers
+        assert [v.name for v in graph.inputs] == ["model.vision_model.weight"]
+        assert spec.inputs[0].name == "model.vision_model.weight"
+        assert spec.inputs[0].location.key == "model.visual.weight"
+
 
 def _fake_export(
     self,
@@ -1102,6 +1136,37 @@ def _fake_export(
     **export_kwargs,
 ):
     pass
+
+
+class TestWeightFreeExportHelpers:
+    def test_component_wrapper_without_direct_config_resolves_nested_vision_dtype(self):
+        from QEfficient.exporter.weight_free.export import (
+            _resolve_weight_free_config,
+            _resolve_weight_free_target_dtype,
+            _run_quantizer_for_wf,
+        )
+
+        class ComponentWrapper:
+            def __init__(self):
+                self.model = SimpleNamespace(vision_model=SimpleNamespace(config=SimpleNamespace(dtype=torch.bfloat16)))
+                self.to_dtype = None
+
+            def to(self, dtype):
+                self.to_dtype = dtype
+                return self
+
+        component = ComponentWrapper()
+        qeff_model = SimpleNamespace(
+            model=component,
+            hash_params={"pretrained_model_name_or_path": "dummy-model"},
+        )
+
+        assert _resolve_weight_free_config(qeff_model) is component.model.vision_model.config
+        assert _resolve_weight_free_target_dtype(qeff_model) is torch.bfloat16
+
+        _run_quantizer_for_wf(qeff_model, torch.bfloat16)
+
+        assert component.to_dtype is torch.bfloat16
 
 
 class TestWeightFreeExportHash:
