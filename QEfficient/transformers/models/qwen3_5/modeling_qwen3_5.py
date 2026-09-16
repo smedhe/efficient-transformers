@@ -907,7 +907,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     conv_state_all_flat.shape[1], dtype=torch.int64, device=conv_state_all_flat.device
                 )[None, :]
                 cache_params.conv_states[self.layer_idx] = ctx_scatter_cb_3d(
-                    conv_state_all, conv_batch_index, conv_position_ids, new_conv_state
+                    conv_state_all, conv_batch_index, conv_position_ids, new_conv_state_flat
                 )
                 if conv_state_all.ndim == 4:
                     cache_params.conv_states[self.layer_idx] = cache_params.conv_states[self.layer_idx].reshape(
