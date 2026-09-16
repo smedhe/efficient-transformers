@@ -1102,6 +1102,8 @@ class QEffQwen3VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneration)
     ):
         bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE + 1
         fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
+        if continuous_batching and kwargs.get("batch_fold", False):
+            bs = fbs
 
         prefill_seq_len = kwargs.get("prefill_seq_len")
         if prefill_seq_len is None:

@@ -303,9 +303,10 @@ class QEffDynamicLayer(CacheLayerMixin):
             k_out = folded_cache
         T_block = end_index - start_index
 
-        ctx_indices = torch.arange(start=start_index, end=end_index)[None, None, ...]
+        ctx_indices = torch.arange(start=start_index, end=end_index, device=position_ids.device)[None, None, ...]
         gather_limit = position_ids.max(1, keepdim=True).values
         gather_limit = torch.cat([gather_limit] * Hkv, dim=1).reshape(1, -1, 1)
+        ctx_indices = ctx_indices.to(gather_limit.device)
         invalid_mask = ctx_indices > gather_limit
 
         invalid_idx_value = InvalidIndexProvider._get_invalid_idx_value()
@@ -385,9 +386,10 @@ class QEffDynamicLayer(CacheLayerMixin):
         else:
             v_out = folded_cache
         T_block = end_index - start_index
-        ctx_indices = torch.arange(start=start_index, end=end_index)[None, None, ...]
+        ctx_indices = torch.arange(start=start_index, end=end_index, device=position_ids.device)[None, None, ...]
         gather_limit = position_ids.max(1, keepdim=True).values
         gather_limit = torch.cat([gather_limit] * Hkv, dim=1).reshape(1, -1, 1)
+        ctx_indices = ctx_indices.to(gather_limit.device)
         invalid_mask = ctx_indices > gather_limit
 
         invalid_idx_value = InvalidIndexProvider._get_invalid_idx_value()
