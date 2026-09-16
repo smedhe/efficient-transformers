@@ -43,6 +43,7 @@ from QEfficient.exporter.weight_free.checkpoint_key_resolver import find_checkpo
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DtypeConversionCheckpointTransform,
     GraniteMoeFusedExpertSplitCheckpointTransform,
+    MoEExpertParallelCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
 )
@@ -305,6 +306,79 @@ class TestWeightFreeCheckpointTransforms:
         )
         assert f"{prefix}.experts.gate_proj" not in tensors
         assert f"{prefix}.experts.down_proj_t" not in tensors
+
+    def test_packs_moe_weights_for_expert_parallel_prefill(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        prefix = "model.language_model.layers.0.mlp.moe_weights"
+        gate = torch.arange(4 * 3 * 2, dtype=torch.float32).reshape(4, 3, 2)
+        up = gate + 100
+        down = torch.arange(4 * 2 * 3, dtype=torch.float32).reshape(4, 2, 3) + 200
+        router = torch.ones(4, 3, dtype=torch.float32)
+        _write_safetensors_checkpoint(
+            src,
+            {
+                f"{prefix}.gate": gate,
+                f"{prefix}.up": up,
+                f"{prefix}.down": down,
+                "model.language_model.layers.0.mlp.gate.weight": router,
+            },
+        )
+
+        changed = MoEExpertParallelCheckpointTransform.apply(
+            src,
+            out,
+            target_dtype=torch.float32,
+            hash_params={
+                "prefill_only": True,
+                "moe_prefill_flavour": "expert_parallel",
+                "moe_prefill_num_pipeline_stages": 2,
+                "moe_prefill_num_parallelized_experts": 2,
+            },
+        )
+
+        assert changed
+        tensors = _load_prepared_tensors(out)
+        torch.testing.assert_close(tensors[f"{prefix}.gate"], gate.view(2, 2, 3, 2).transpose(0, 1))
+        torch.testing.assert_close(tensors[f"{prefix}.up"], up.view(2, 2, 3, 2).transpose(0, 1))
+        torch.testing.assert_close(tensors[f"{prefix}.down"], down.view(2, 2, 2, 3).transpose(0, 1))
+        torch.testing.assert_close(tensors["model.language_model.layers.0.mlp.gate.weight"], router)
+
+    def test_fused_split_packs_moe_weights_for_expert_parallel_prefill(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        prefix = "model.language_model.layers.0.mlp.experts"
+        moe_prefix = "model.language_model.layers.0.mlp.moe_weights"
+        gate = torch.full((4, 3, 2), 1.0)
+        up = torch.full((4, 3, 2), 2.0)
+        gate_up = torch.cat((gate.transpose(1, 2), up.transpose(1, 2)), dim=1)
+        down = torch.arange(4 * 2 * 3, dtype=torch.float32).reshape(4, 2, 3)
+        _write_safetensors_checkpoint(
+            src,
+            {
+                f"{prefix}.gate_up_proj": gate_up,
+                f"{prefix}.down_proj": down.transpose(1, 2),
+            },
+        )
+
+        changed = MoEFusedExpertSplitCheckpointTransform.apply(
+            src,
+            out,
+            target_dtype=torch.float32,
+            hash_params={
+                "moe_prefill_flavour": "expert_parallel",
+                "moe_prefill_num_pipeline_stages": 2,
+                "moe_prefill_num_parallelized_experts": 2,
+            },
+        )
+
+        assert changed
+        tensors = _load_prepared_tensors(out)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.gate"], gate.view(2, 2, 3, 2).transpose(0, 1))
+        torch.testing.assert_close(tensors[f"{moe_prefix}.up"], up.view(2, 2, 3, 2).transpose(0, 1))
+        torch.testing.assert_close(tensors[f"{moe_prefix}.down"], down.view(2, 2, 2, 3).transpose(0, 1))
 
     def test_splits_dim2_fused_experts_with_bias_to_moe_weights(self, tmp_path):
         src = tmp_path / "src"
