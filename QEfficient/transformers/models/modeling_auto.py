@@ -1143,6 +1143,14 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
     ]
     _onnx_transforms = []
 
+    _checkpoint_transforms = [
+        GptOssMxfp4ExpertDequantSplitCheckpointTransform,
+        MoEExpertStackingCheckpointTransform,
+        MoEFusedExpertSplitCheckpointTransform,
+        GraniteMoeFusedExpertSplitCheckpointTransform,
+        DtypeConversionCheckpointTransform,
+    ]
+
     def __init__(self, model: nn.modules, **kwargs):
         """
         Initializes the vision encoder component for multimodal models.
@@ -1530,6 +1538,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         self.model = model
         self.config = model.config
         self._pretrained_model_name_or_path = kwargs.get("pretrained_model_name_or_path", None)
+        self._weight_free = kwargs.get("weight_free", False)
 
         self.vision_model = QEffVisionEncoderForTextImageToTextModel(model, **kwargs)
         self.lang_model = QEffCausalLMForTextImageToTextModel(model, qaic_config=qaic_config, **kwargs)

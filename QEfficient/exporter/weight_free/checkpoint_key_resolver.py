@@ -124,6 +124,16 @@ def find_checkpoint_key(
     stripped = onnx_name.removeprefix("base_model.")
     candidates.append(stripped)
 
+    if ".vision_model." in stripped:
+        candidates.append(stripped.replace(".vision_model.", ".visual.", 1))
+    if ".visual." in stripped:
+        candidates.append(stripped.replace(".visual.", ".vision_model.", 1))
+
+    if stripped.startswith("model.lm_head."):
+        candidates.append(stripped.removeprefix("model."))
+    if stripped.startswith("language_model."):
+        candidates.append(f"model.{stripped}")
+
     prefix = getattr(backbone, "base_model_prefix", "")
     if prefix:
         candidates.append(f"{prefix}.{stripped}")
@@ -147,6 +157,14 @@ def find_checkpoint_key(
         checkpoint_index,
         onnx_name,
     )
+
+
+def _named_state_keys(module: nn.Module, iterator_name: str) -> set[str]:
+    iterator = getattr(module, iterator_name)
+    try:
+        return {name for name, _ in iterator(remove_duplicate=False)}
+    except TypeError:
+        return {name for name, _ in iterator()}
 
 
 def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name: str, qeff_model) -> WeightSpec:
