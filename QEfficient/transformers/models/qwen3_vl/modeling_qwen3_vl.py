@@ -406,6 +406,8 @@ class QEffQwen3VLTextAttention(Qwen3VLTextAttention):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         comp_ctx_lengths: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
@@ -443,6 +445,8 @@ class QEffQwen3VLTextAttention(Qwen3VLTextAttention):
                 comp_ctx_length=comp_ctx_lengths,
                 batch_index=batch_index,
                 position_ids=position_ids[0],
+                block_table=block_table,
+                slot_id=slot_id,
                 past_seen_tokens=past_seen_tokens,
             )
         else:
@@ -481,6 +485,8 @@ class QEffQwen3VLTextDecoderLayer(Qwen3VLTextDecoderLayer):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
         past_key_values: tuple[torch.Tensor] | None = None,
         batch_index: torch.LongTensor | None = None,
         comp_ctx_lengths: torch.LongTensor | None = None,
@@ -523,6 +529,8 @@ class QEffQwen3VLTextDecoderLayer(Qwen3VLTextDecoderLayer):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
+            block_table=block_table,
+            slot_id=slot_id,
             past_key_values=past_key_values,
             batch_index=batch_index,
             comp_ctx_lengths=comp_ctx_lengths,
@@ -562,6 +570,8 @@ class QEffQwen3VLTextModel(Qwen3VLTextModel):
         input_ids: torch.LongTensor | None = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
         past_key_values: list[torch.FloatTensor] | None = None,
         comp_ctx_lengths: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
@@ -637,6 +647,8 @@ class QEffQwen3VLTextModel(Qwen3VLTextModel):
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
+                block_table=block_table,
+                slot_id=slot_id,
                 past_key_values=past_key_values,
                 comp_ctx_lengths=comp_ctx_lengths,
                 batch_index=batch_index,
@@ -701,6 +713,7 @@ class QEffQwen3VLEncoderWrapper(nn.Module):
         super().__init__()
         self.model = model.model
         self.model.vision_model = self.model.visual
+        self.config = model.config
 
     def get_submodules_for_export(self) -> type[nn.Module]:
         """
@@ -728,6 +741,7 @@ class QEffQwen3VLDecoderWrapper(nn.Module):
         super().__init__()
         self.model = model
         self.language_model = self.model.model.language_model
+        self.config = model.config
 
     def get_submodules_for_export(self) -> type[nn.Module]:
         """
@@ -746,6 +760,8 @@ class QEffQwen3VLDecoderWrapper(nn.Module):
         position_ids,
         image_idx,
         past_key_values,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
         comp_ctx_lengths: list[int] | None = None,
     ):
@@ -776,6 +792,8 @@ class QEffQwen3VLDecoderWrapper(nn.Module):
         outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
+            block_table=block_table,
+            slot_id=slot_id,
             past_key_values=past_key_values,
             comp_ctx_lengths=comp_ctx_lengths,
             batch_index=batch_index,
@@ -819,6 +837,8 @@ class QEffQwen3VLModel(Qwen3VLModel):
         input_ids: torch.LongTensor | None = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
         past_key_values: list[torch.FloatTensor] | None = None,
         comp_ctx_lengths: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
@@ -842,6 +862,8 @@ class QEffQwen3VLModel(Qwen3VLModel):
         outputs = self.language_model(
             input_ids=None,
             position_ids=position_ids,
+            block_table=block_table,
+            slot_id=slot_id,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             comp_ctx_lengths=comp_ctx_lengths,
@@ -877,6 +899,8 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         input_ids,
         position_ids,
         past_key_values,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
         pixel_values: torch.FloatTensor | None = None,
         image_idx: torch.LongTensor | None = None,
         comp_ctx_lengths: list[int] | None = None,
@@ -899,6 +923,8 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
+            block_table=block_table,
+            slot_id=slot_id,
             past_key_values=past_key_values,
             comp_ctx_lengths=comp_ctx_lengths,
             batch_index=batch_index,
@@ -955,8 +981,33 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         lang_inputs = {}
         vision_inputs["pixel_values"] = torch.zeros((inputs_shapes["pixel_values"]), dtype=self.model.config.dtype)
         vision_inputs["image_grid_thw"] = torch.zeros((inputs_shapes["image_grid_thw"]), dtype=torch.int64)
+
+        bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
+        fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
+
+        # Add data for KV
+        kv_cache_shape = get_padding_shape_from_config(
+            config=self.model.config.text_config,
+            batch_size=fbs if continuous_batching else bs,
+            seq_len=prefill_seq_len,
+        )
+
         lang_inputs["input_ids"] = torch.zeros((inputs_shapes["input_ids"]), dtype=torch.int64)
-        lang_inputs["vision_embeds"] = torch.zeros((inputs_shapes["vision_embeds"]), dtype=self.model.config.dtype)
+        lang_inputs["vision_embeds"] = torch.zeros(
+            (inputs_shapes["vision_embeds"]), dtype=self.model.config.torch_dtype
+        )
+        qaic_config = getattr(self.model, "qaic_config", None)
+        blocking_mode = qaic_config.get("blocking_mode") if qaic_config is not None else None
+        if blocking_mode is not None and "paged" in blocking_mode:
+            num_kv_blocks = qaic_config["num_kv_blocks"]
+            batch, num_kv_heads, CL, dh = kv_cache_shape
+            prefill_seq_len = kv_block_size = -(-CL // num_kv_blocks)
+            total_num_kv_blocks = batch * num_kv_blocks
+            kv_cache_shape = [total_num_kv_blocks, num_kv_heads, kv_block_size, dh]
+            lang_inputs["block_table"] = torch.arange((bs * num_kv_blocks), dtype=torch.int64).view(bs, num_kv_blocks)
+            lang_inputs["slot_id"] = torch.zeros(bs, dtype=torch.int64)
+            lang_inputs["input_ids"] = torch.zeros((bs, prefill_seq_len), dtype=torch.int64)
+
         lang_inputs["position_ids"] = (
             (torch.arange(prefill_seq_len, dtype=torch.int64).view(1, prefill_seq_len).repeat(bs, 1))
             .unsqueeze(0)
@@ -965,13 +1016,6 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         lang_inputs["image_idx"] = torch.zeros((inputs_shapes["image_idx"]), dtype=torch.int64)
         lang_inputs["deepstack_features"] = torch.zeros(
             (inputs_shapes["deepstack_features"]), dtype=self.model.config.dtype
-        )
-        # Add data for KV
-
-        kv_cache_shape = get_padding_shape_from_config(
-            config=self.model.config.text_config,
-            batch_size=fbs if continuous_batching else bs,
-            seq_len=prefill_seq_len,
         )
 
         lang_inputs["past_key_values"] = [[] for _ in range(self.model.config.text_config.num_hidden_layers)]
@@ -1143,6 +1187,14 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             if full_batch_size:
                 lang_prefill["full_batch_exec_size"] = full_batch_size
 
+            qaic_config = getattr(self.model, "qaic_config", None)
+            blocking_mode = qaic_config.get("blocking_mode") if qaic_config is not None else None
+            if blocking_mode is not None and "paged" in blocking_mode:
+                num_kv_blocks = self.model.qaic_config["num_kv_blocks"]
+                lang_prefill["num_kv_blocks"] = num_kv_blocks
+                lang_prefill["total_num_kv_blocks"] = kv_cache_batch_size * num_kv_blocks
+                lang_prefill["kv_block_size"] = -(-ctx_len // num_kv_blocks)
+
             lang_decode = {
                 "batch_size": full_batch_size if continuous_batching else batch_size,
                 "seq_len": 1,
@@ -1156,6 +1208,14 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 lang_decode["full_batch_size"] = kv_cache_batch_size
             else:
                 lang_decode["batch_size"] = kv_cache_batch_size
+
+            qaic_config = getattr(self.model, "qaic_config", None)
+            blocking_mode = qaic_config.get("blocking_mode") if qaic_config is not None else None
+            if blocking_mode is not None and "paged" in blocking_mode:
+                num_kv_blocks = self.model.qaic_config["num_kv_blocks"]
+                lang_decode["num_kv_blocks"] = num_kv_blocks
+                lang_decode["total_num_kv_blocks"] = kv_cache_batch_size * num_kv_blocks
+                lang_decode["kv_block_size"] = -(-ctx_len // num_kv_blocks)
 
             lang = [lang_prefill, lang_decode]
 
@@ -1188,15 +1248,24 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             "deepstack_features": {1: "vision_batch_size", 2: "vision_size"},
         }
 
+        pkv_dynamic_axes = {
+            0: "full_batch_size" if continuous_batching else "batch_size",
+            2: "ctx_len",
+        }
+
+        qaic_config = getattr(self.model, "qaic_config", None)
+        blocking_mode = qaic_config.get("blocking_mode") if qaic_config is not None else None
+        if blocking_mode is not None and "paged" in blocking_mode:
+            lang_dynamic_axes["block_table"] = {0: "batch_size"}
+            lang_dynamic_axes["slot_id"] = {0: "batch_size"}
+            pkv_dynamic_axes = {
+                0: "total_num_kv_blocks",
+                2: "kv_block_size",
+            }
+
         for i in range(num_layers):
-            lang_dynamic_axes[f"past_key.{i}"] = {
-                0: "full_batch_size" if continuous_batching else "batch_size",
-                2: "ctx_len",
-            }
-            lang_dynamic_axes[f"past_value.{i}"] = {
-                0: "full_batch_size" if continuous_batching else "batch_size",
-                2: "ctx_len",
-            }
+            lang_dynamic_axes[f"past_key.{i}"] = pkv_dynamic_axes
+            lang_dynamic_axes[f"past_value.{i}"] = pkv_dynamic_axes
 
         if continuous_batching:
             lang_dynamic_axes["batch_index"] = {0: "batch_size"}
