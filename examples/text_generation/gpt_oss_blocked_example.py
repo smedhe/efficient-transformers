@@ -55,14 +55,14 @@ def assert_generated_tokens_match(reference_exec_info, blocked_exec_info, label)
 def main():
     parser = argparse.ArgumentParser(description="Basic text generation inference")
     parser.add_argument("--model-name", type=str, default="openai/gpt-oss-20b", help="HuggingFace model ID")
-    parser.add_argument("--prompt", type=str, default="Hello", help="Input prompt")
+    parser.add_argument("--prompt", type=str, default="What is chemistry", help="Input prompt")
     parser.add_argument("--prefill-seq-len", type=int, default=1, help="Prefill sequence length")
     parser.add_argument(
         "--ctx-len", type=int, default=2048, help="Context length high enough to force blocking computation"
     )
     parser.add_argument("--generation-len", type=int, default=100, help="Number of tokens to generate")
     parser.add_argument("--num-cores", type=int, default=16, help="Number of cores")
-    parser.add_argument("--num-layers", type=int, default=12, help="Number of layers")
+    parser.add_argument("--num-layers", type=int, default=None, help="Number of layers")
     parser.add_argument(
         "--device-group",
         type=lambda device_ids: [int(x) for x in device_ids.strip("[]").split(",")],
@@ -119,7 +119,7 @@ def main():
         "mxfp6_matmul": True,
         "mxint8_kv_cache": True,
         "retain_full_kv": True,
-        "use_onnx_subfunctions": args.subf,
+        "use_onnx_subfunctions": True,
     }
     if npi_file_path is not None:
         common_compile_kwargs["node_precision_info"] = npi_file_path
@@ -128,7 +128,10 @@ def main():
         if args.num_layers:
             model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=args.num_layers)
         else:
-            model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name)
+            model = QEFFAutoModelForCausalLM.from_pretrained(
+                args.model_name,
+                weight_free=True,
+            )
 
         # Compile the model
         qpc_path = model.compile(**common_compile_kwargs)
@@ -147,7 +150,10 @@ def main():
     if args.num_layers:
         model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=args.num_layers)
     else:
-        model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name)
+        model_blocked = QEFFAutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            weight_free=True,
+        )
 
     # model_blocked._offload_model_weights(True)
 
