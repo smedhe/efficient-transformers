@@ -216,9 +216,11 @@ def main():
     config = AutoConfig.from_pretrained(args.model_name)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     num_hidden_layers = args.num_layers if args.num_layers else config.num_hidden_layers
-    from_pretrained_kwargs = {"num_hidden_layers": num_hidden_layers} if args.num_layers else {}
-    # if args.full_batch_size > 1:
-    #     from_pretrained_kwargs["continuous_batching"] = True
+    from_pretrained_kwargs = (
+        {"num_hidden_layers": num_hidden_layers, "weight_free": True} if args.num_layers else {"weight_free": True}
+    )
+    if args.full_batch_size > 1:
+        from_pretrained_kwargs["continuous_batching"] = True
 
     generation_len = args.generation_len
 
