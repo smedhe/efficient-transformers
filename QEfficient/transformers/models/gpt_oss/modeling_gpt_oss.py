@@ -665,7 +665,7 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
                 key_states, value_states = past_key_values.sliding_window_update_chunked(
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
-            elif not use_blocking:
+            else:
                 if comp_ctx_lengths is not None:
                     attention_mask = attention_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
                     cache_kwargs["CCL"] = attention_mask.shape[-1]
