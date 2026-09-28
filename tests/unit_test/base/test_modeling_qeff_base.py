@@ -37,6 +37,29 @@ CTX_LEN = 32
 SEQ_LEN = 8
 
 
+@pytest.mark.cpu_only
+def test_align_retained_state_output_shapes_copies_full_input_contract():
+    input_shape = ["main_kv_batch_size", 4, "main_kv_ctx_len", 8]
+    generated_output_shape = ["generated_batch", 4, "generated_ctx", "generated_dim"]
+    graph = helper.make_graph(
+        [helper.make_node("Identity", ["past_key.1"], ["past_key.1_InternalRetainedState"])],
+        "retained-state-shape-alignment",
+        [helper.make_tensor_value_info("past_key.1", TensorProto.FLOAT, input_shape)],
+        [
+            helper.make_tensor_value_info(
+                "past_key.1_InternalRetainedState", TensorProto.FLOAT, generated_output_shape
+            )
+        ],
+    )
+    model = helper.make_model(graph)
+
+    _align_retained_state_output_shapes(model)
+
+    input_dims = model.graph.input[0].type.tensor_type.shape.dim
+    output_dims = model.graph.output[0].type.tensor_type.shape.dim
+    assert [dim.SerializeToString() for dim in output_dims] == [dim.SerializeToString() for dim in input_dims]
+
+
 def make_tiny_gpt2():
     cfg = GPT2Config(n_layer=2, n_head=2, n_embd=64, vocab_size=VOCAB_SIZE, n_positions=CTX_LEN, n_ctx=CTX_LEN)
     return GPT2LMHeadModel(cfg).eval(), cfg
