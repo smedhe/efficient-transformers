@@ -31,7 +31,7 @@ The path to the treasure was not an easy one. Alex had to navigate through dense
 """
 # Run prefill
 config = AutoConfig.from_pretrained(model_id)
-config.num_hidden_layers = 2
+config.num_hidden_layers = 6
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 PREFILL_SEQ_LEN = 512
 PROMPT_LEN = 4096
@@ -39,12 +39,13 @@ CTX_LEN = 8192
 NUM_CORES = 16
 MOE_PREFILL_PACKED_CHUNK_SIZE = 256
 
-qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, num_hidden_layers=2)
+qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id,weight_free=True, continuous_batching=True, num_hidden_layers=6)
 
 decode_qpc_path = qeff_model.compile(
     prefill_seq_len=1,
     ctx_len=CTX_LEN,
     num_cores=NUM_CORES,
+    full_batch_size=4,
     mxfp6_matmul=True,
     mxint8_kv_cache=True,
     num_devices=1,
@@ -68,6 +69,7 @@ prefill_qpc_path = qeff_model.compile(
     qaic_config={"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}},
     mxfp6_matmul=True,
     mxint8_kv_cache=True,
+    full_batch_size=4,
     num_devices=1,
     mos=1,
     user_tiled=True,

@@ -126,7 +126,7 @@ def main():
 
     if args.compare_non_blocking:
         if args.num_layers:
-            model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=args.num_layers)
+            model = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=args.num_layers, weight_free=True,)
         else:
             model = QEFFAutoModelForCausalLM.from_pretrained(
                 args.model_name,
@@ -148,7 +148,7 @@ def main():
         print(f"Generated: {exec_info.generated_texts[0]}")
 
     if args.num_layers:
-        model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=args.num_layers)
+        model_blocked = QEFFAutoModelForCausalLM.from_pretrained(args.model_name, num_hidden_layers=args.num_layers, weight_free=True,)
     else:
         model_blocked = QEFFAutoModelForCausalLM.from_pretrained(
             args.model_name,

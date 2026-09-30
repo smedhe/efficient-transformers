@@ -20,8 +20,10 @@ Optionally compares against a non-blocked baseline with --compare-non-blocked.
 
 import argparse
 import time
+from pathlib import Path
 
 import numpy as np
+import onnx
 from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
@@ -60,7 +62,7 @@ def parse_args():
     parser.add_argument("--ctx-len", type=int, default=8192, help="Context length")
     parser.add_argument("--generation-len", type=int, default=100, help="Number of decode tokens to generate")
     parser.add_argument("--num-cores", type=int, default=16, help="Number of cores per device")
-    parser.add_argument("--num-layers", type=int, default=None, help="Override number of layers (for quick testing)")
+    parser.add_argument("--num-layers", type=int, default=4, help="Override number of layers (for quick testing)")
     parser.add_argument("--num-kv-blocks", type=int, default=2, help="Number of KV blocks for blocked attention")
     parser.add_argument("--num-q-blocks", type=int, default=2, help="Number of Q blocks for prefill blocked attention")
     parser.add_argument(
@@ -113,6 +115,22 @@ def parse_args():
     return parser.parse_args()
 
 
+def assert_generated_tokens_match(reference_ids, blocked_ids, label):
+    reference_ids = np.asarray(reference_ids)
+    blocked_ids = np.asarray(blocked_ids)
+    if np.array_equal(reference_ids, blocked_ids):
+        print(f"Token comparison ({label} vs non-blocked): MATCH")
+        print(f"Generated token IDs: {blocked_ids.tolist()}")
+        return
+
+    mismatch = np.argwhere(reference_ids != blocked_ids)
+    first_mismatch = tuple(mismatch[0].tolist()) if mismatch.size else None
+    raise AssertionError(
+        f"Token comparison ({label} vs non-blocked): MISMATCH at {first_mismatch}; "
+        f"non-blocked={reference_ids.tolist()}, blocked={blocked_ids.tolist()}"
+    )
+
+
 def prepare_chunked_inputs(tokenizer, prompt, prefill_seq_len, prompt_len=None):
     """Tokenize prompt and pad to a multiple of prefill_seq_len.
 
@@ -127,42 +145,88 @@ def prepare_chunked_inputs(tokenizer, prompt, prefill_seq_len, prompt_len=None):
     padded_len = num_chunks * prefill_seq_len
     inputs = tokenizer(prompt, return_tensors="np", padding="max_length", max_length=padded_len)
     inputs["position_ids"] = np.where(
-        inputs.pop("attention_mask"), np.arange(padded_len, dtype=np.int32), np.int32(-1)
-    ).astype(np.int32)
+        inputs.pop("attention_mask"), np.arange(padded_len, dtype=np.int64), np.int64(-1)
+    ).astype(np.int64)
     inputs.pop("token_type_ids", None)
     return inputs, effective_len, num_chunks
 
 
-def run_chunked_prefill(prefill_session, inputs, num_chunks, prefill_seq_len, num_hidden_layers):
+RETAINED_STATE_SUFFIX = "_RetainedState"
+
+
+def get_onnx_output_names(qpc_path):
+    onnx_path = Path(qpc_path).parents[1] / "GptOssForCausalLM.onnx"
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    return [output.name for output in model.graph.output]
+
+
+def _unique_output_values(qpc_out):
+    seen = set()
+    values = []
+    for value in qpc_out.values():
+        value_id = id(value)
+        if value_id in seen:
+            continue
+        seen.add(value_id)
+        values.append(value)
+    return values
+
+
+def get_output_by_onnx_name(qpc_out, onnx_output_names, output_name):
+    if output_name in qpc_out:
+        return qpc_out[output_name]
+    values = _unique_output_values(qpc_out)
+    try:
+        output_idx = onnx_output_names.index(output_name)
+    except ValueError as exc:
+        raise KeyError(f"{output_name} is not an output in the exported ONNX graph") from exc
+    if output_idx >= len(values):
+        raise KeyError(
+            f"Runtime returned {len(values)} unique outputs, but ONNX output {output_name} is at index {output_idx}. "
+            f"Runtime keys: {sorted(qpc_out)}; ONNX outputs: {onnx_output_names}"
+        )
+    return values[output_idx]
+
+
+def get_logits(qpc_out, onnx_output_names):
+    return get_output_by_onnx_name(qpc_out, onnx_output_names, "logits")
+
+
+def update_retained_state_inputs(inputs, qpc_out, onnx_output_names, num_hidden_layers):
+    for layer in range(num_hidden_layers):
+        for kind in ("key", "value"):
+            input_name = f"past_{kind}.{layer}"
+            output_name = f"{input_name}{RETAINED_STATE_SUFFIX}"
+            inputs[input_name] = get_output_by_onnx_name(qpc_out, onnx_output_names, output_name)
+
+
+def run_chunked_prefill(prefill_session, inputs, num_chunks, prefill_seq_len, num_hidden_layers, onnx_output_names):
     """Run chunked prefill, accumulating KV states into inputs. Returns final chunk output."""
     qpc_out = None
     for i in range(num_chunks):
         chunk = {
             "input_ids": inputs["input_ids"][:, i * prefill_seq_len : (i + 1) * prefill_seq_len],
-            "position_ids": inputs["position_ids"][:, i * prefill_seq_len : (i + 1) * prefill_seq_len].astype(np.int32),
+            "position_ids": inputs["position_ids"][:, i * prefill_seq_len : (i + 1) * prefill_seq_len].astype(np.int64),
         }
+        chunk.update({name: value for name, value in inputs.items() if name.startswith("past_")})
         t0 = time.time()
         qpc_out = prefill_session.run(chunk)
         print(f"    chunk {i + 1}/{num_chunks}: {time.time() - t0:.3f}s")
-        for layer in range(num_hidden_layers):
-            inputs[f"past_key.{layer}"] = qpc_out[f"past_key.{layer}_RetainedState"]
-            inputs[f"past_value.{layer}"] = qpc_out[f"past_value.{layer}_RetainedState"]
+        update_retained_state_inputs(inputs, qpc_out, onnx_output_names, num_hidden_layers)
     return qpc_out
 
 
-def run_decode_loop(decode_session, decode_inputs, generation_len, num_hidden_layers):
+def run_decode_loop(decode_session, decode_inputs, generation_len, num_hidden_layers, onnx_output_names):
     """Autoregressive decode loop. Returns (token array [B, gen_len], elapsed seconds)."""
     all_tokens = []
     st = time.time()
     for _ in range(generation_len):
         out = decode_session.run(decode_inputs)
-        next_tokens = select_next_token_ids(out["logits"])  # [B, 1]
+        next_tokens = select_next_token_ids(get_logits(out, onnx_output_names))  # [B, 1]
         all_tokens.append(next_tokens)
         decode_inputs["input_ids"] = next_tokens
-        decode_inputs["position_ids"] = (decode_inputs["position_ids"] + 1).astype(np.int32)
-        for layer in range(num_hidden_layers):
-            decode_inputs[f"past_key.{layer}"] = out[f"past_key.{layer}_RetainedState"]
-            decode_inputs[f"past_value.{layer}"] = out[f"past_value.{layer}_RetainedState"]
+        decode_inputs["position_ids"] = (decode_inputs["position_ids"] + 1).astype(np.int64)
+        update_retained_state_inputs(decode_inputs, out, onnx_output_names, num_hidden_layers)
     return np.concatenate(all_tokens, axis=1), time.time() - st  # [B, gen_len]
 
 
@@ -181,7 +245,7 @@ def select_next_token_ids(logits, token_idx=None):
     return np.argmax(token_logits, axis=-1, keepdims=True)
 
 
-def build_decode_inputs(qpc_out, inputs, num_hidden_layers, prefill_seq_len):
+def build_decode_inputs(qpc_out, inputs, num_hidden_layers, prefill_seq_len, onnx_output_names):
     """Assemble decode inputs from the last prefill chunk output.
 
     Works for any batch size. For each batch item the first decode token is
@@ -197,18 +261,23 @@ def build_decode_inputs(qpc_out, inputs, num_hidden_layers, prefill_seq_len):
     last_valid_idx = int(np.argmax(last_chunk_pos[0]))
     decode_inputs = {
         # [B, 1]: argmax over vocab at the last valid position of the last chunk
-        "input_ids": select_next_token_ids(qpc_out["logits"], token_idx=last_valid_idx),
+        "input_ids": select_next_token_ids(get_logits(qpc_out, onnx_output_names), token_idx=last_valid_idx),
         # [B, 1]: per-batch next decode position
-        "position_ids": (np.max(inputs["position_ids"], axis=-1, keepdims=True) + 1).astype(np.int32),
+        "position_ids": (np.max(inputs["position_ids"], axis=-1, keepdims=True) + 1).astype(np.int64),
     }
-    for layer in range(num_hidden_layers):
-        decode_inputs[f"past_key.{layer}"] = qpc_out[f"past_key.{layer}_RetainedState"]
-        decode_inputs[f"past_value.{layer}"] = qpc_out[f"past_value.{layer}_RetainedState"]
+    decode_inputs.update({name: value for name, value in inputs.items() if name.startswith("past_")})
     return decode_inputs
 
 
 def main():
     args = parse_args()
+    if args.num_devices != 1:
+        raise ValueError(
+            "gpt_oss_blocked_prefill_headpar_example.py uses QAICInferenceSession.run() with host-copy KV "
+            "retained-state outputs, matching examples/disagg_serving/gpt_oss_disagg_mode_with_chunking.py. "
+            "Use --num-devices 1 for this script. Multi-device GPT-OSS prefill/decode handoff needs the "
+            "kv_dma_share continuous-batching flow."
+        )
 
     # Replicate prompt to fill the requested batch size
     prompts = [args.prompt] * args.full_batch_size
@@ -253,6 +322,7 @@ def main():
         num_cores=args.num_cores,
         num_devices=args.num_devices,
         mxfp6_matmul=True,
+        mos=1,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=args.subf,
         retain_full_kv=True,
@@ -286,6 +356,8 @@ def main():
         **compile_kwargs,
     )
     print(f"  -> {prefill_qpc_path}")
+    decode_output_names = get_onnx_output_names(decode_qpc_path)
+    prefill_output_names = get_onnx_output_names(prefill_qpc_path)
 
     # ── Optionally compile non-blocked baseline ───────────────────────────────
     baseline_decode_qpc = baseline_prefill_qpc = None
@@ -310,6 +382,8 @@ def main():
         )
         print(f"  -> decode:  {baseline_decode_qpc}")
         print(f"  -> prefill: {baseline_prefill_qpc}")
+        baseline_decode_output_names = get_onnx_output_names(baseline_decode_qpc)
+        baseline_prefill_output_names = get_onnx_output_names(baseline_prefill_qpc)
 
     # ── Prepare inputs ────────────────────────────────────────────────────────
     inputs, prompt_len, num_chunks = prepare_chunked_inputs(
@@ -324,15 +398,20 @@ def main():
     prefill_session = QAICInferenceSession(prefill_qpc_path)
 
     t0 = time.time()
-    qpc_out = run_chunked_prefill(prefill_session, inputs, num_chunks, args.prefill_seq_len, num_hidden_layers)
+    qpc_out = run_chunked_prefill(
+        prefill_session, inputs, num_chunks, args.prefill_seq_len, num_hidden_layers, prefill_output_names
+    )
     t_prefill = time.time() - t0
 
-    decode_inputs = build_decode_inputs(qpc_out, inputs, num_hidden_layers, args.prefill_seq_len)
+    decode_inputs = build_decode_inputs(qpc_out, inputs, num_hidden_layers, args.prefill_seq_len, prefill_output_names)
     first_token_ids = decode_inputs["input_ids"].copy()  # [B, 1], save before decode modifies it
     print(f"\n--- Blocked head-par decode ({generation_len} tokens) ---")
-    tokens, t_decode = run_decode_loop(decode_session, decode_inputs, generation_len, num_hidden_layers)
+    tokens, t_decode = run_decode_loop(
+        decode_session, decode_inputs, generation_len, num_hidden_layers, decode_output_names
+    )
     # tokens: [B, gen_len]; prepend first token from prefill to get full generated sequence
-    blocked_texts = [tokenizer.decode(list(first_token_ids[b]) + list(tokens[b])) for b in range(args.full_batch_size)]
+    blocked_token_ids = np.concatenate([first_token_ids, tokens], axis=1)
+    blocked_texts = [tokenizer.decode(blocked_token_ids[b].tolist()) for b in range(args.full_batch_size)]
 
     # ── Optionally run baseline ───────────────────────────────────────────────
     t_baseline_prefill = t_baseline_decode = None
@@ -345,19 +424,30 @@ def main():
         print("\n--- Baseline prefill ---")
         t0 = time.time()
         qpc_out_bl = run_chunked_prefill(
-            baseline_prefill_session, inputs_bl, num_chunks, args.prefill_seq_len, num_hidden_layers
+            baseline_prefill_session,
+            inputs_bl,
+            num_chunks,
+            args.prefill_seq_len,
+            num_hidden_layers,
+            baseline_prefill_output_names,
         )
         t_baseline_prefill = time.time() - t0
 
-        decode_inputs_bl = build_decode_inputs(qpc_out_bl, inputs_bl, num_hidden_layers, args.prefill_seq_len)
+        decode_inputs_bl = build_decode_inputs(
+            qpc_out_bl, inputs_bl, num_hidden_layers, args.prefill_seq_len, baseline_prefill_output_names
+        )
         first_token_ids_bl = decode_inputs_bl["input_ids"].copy()
         print(f"\n--- Baseline decode ({generation_len} tokens) ---")
         tokens_bl, t_baseline_decode = run_decode_loop(
-            baseline_decode_session, decode_inputs_bl, generation_len, num_hidden_layers
+            baseline_decode_session,
+            decode_inputs_bl,
+            generation_len,
+            num_hidden_layers,
+            baseline_decode_output_names,
         )
-        baseline_texts = [
-            tokenizer.decode(list(first_token_ids_bl[b]) + list(tokens_bl[b])) for b in range(args.full_batch_size)
-        ]
+        baseline_token_ids = np.concatenate([first_token_ids_bl, tokens_bl], axis=1)
+        assert_generated_tokens_match(baseline_token_ids, blocked_token_ids, args.prefill_blocking_mode)
+        baseline_texts = [tokenizer.decode(baseline_token_ids[b].tolist()) for b in range(args.full_batch_size)]
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "=" * 70)

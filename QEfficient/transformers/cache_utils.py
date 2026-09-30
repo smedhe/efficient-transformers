@@ -13,10 +13,9 @@ import torch
 from transformers.cache_utils import Cache, CacheLayerMixin, EncoderDecoderCache
 
 from QEfficient.customop import (
-    CtxChunkScatterBatchFunc,
-    CtxGatherFuncBlockedKVBatch,
     CtxGatherFuncPagedAttention,  # TODO: apply the dynamo related changes coming from latest mainline
     CtxScatterFuncPagedAttention,  # TODO: apply the dynamo related changes coming from latest mainline
+    ctx_chunk_scatter_batch,
     ctx_gather,
     ctx_gather_3d,
     ctx_gather_blocked_kv,
@@ -484,10 +483,7 @@ class QEffDynamicLayer(CacheLayerMixin):
         gather_limit = torch.where(block_indices < 0, 0, gather_limit)
         invalid_mask = ctx_indices > gather_limit
 
-        if torch.onnx.is_in_onnx_export():
-            invalid_idx_value = torch.iinfo(torch.int32).max
-        else:
-            invalid_idx_value = 0
+        invalid_idx_value = InvalidIndexProvider._get_invalid_idx_value()
 
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
 
@@ -1610,7 +1606,7 @@ class QEffSlidingWindowCache:
                 kv_position_ids = position_ids
 
             if batch_index is not None:
-                if torch.onnx.is_in_onnx_export():
+                if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
                     invalid_scatter_index = torch.iinfo(torch.int32).max
                     scatter_position_ids = torch.where(kv_position_ids < 0, invalid_scatter_index, kv_position_ids)
                 else:
@@ -1825,7 +1821,7 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
         )
 
         if batch_index is not None:
-            if torch.onnx.is_in_onnx_export():
+            if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
                 invalid_scatter_index = torch.iinfo(torch.int32).max
                 scatter_position_ids = torch.where(kv_position_ids < 0, invalid_scatter_index, kv_position_ids)
             else:
@@ -1868,8 +1864,10 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
 
         # Scatter
         if batch_index is not None:
-            if torch.onnx.is_in_onnx_export():
+            if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
                 scatter_position_ids = torch.where(position_ids < 0, torch.iinfo(torch.int32).max, position_ids)
+            else:
+                scatter_position_ids = position_ids
             self.keys = ctx_scatter_cb(self.keys, batch_index, scatter_position_ids, key_states)
             self.values = ctx_scatter_cb(self.values, batch_index, scatter_position_ids, value_states)
         else:
@@ -1905,8 +1903,10 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
         invalid_idx_value = InvalidIndexProvider._get_invalid_idx_value()
 
         if batch_index is not None:
-            if torch.onnx.is_in_onnx_export():
+            if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
                 scatter_position_ids = torch.where(position_ids < 0, torch.iinfo(torch.int32).max, position_ids)
+            else:
+                scatter_position_ids = position_ids
             self.keys = ctx_scatter_cb(self.keys, batch_index, scatter_position_ids, key_states)
             self.values = ctx_scatter_cb(self.values, batch_index, scatter_position_ids, value_states)
         else:
