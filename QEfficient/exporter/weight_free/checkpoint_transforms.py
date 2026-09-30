@@ -1130,9 +1130,7 @@ class FusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
                         prefix = down_m.group(1)
                         moe_prefix = _moe_weights_prefix_from_experts_prefix(prefix)
                         split_dim = cls._resolve_split_dim(prefix, canonical_index)
-                        out_tensors[f"{moe_prefix}.down"] = _down_to_canonical(
-                            tensor, None, preferred_split_dim=split_dim
-                        )
+                        down = _down_to_canonical(tensor, None, preferred_split_dim=split_dim)
                         out_tensors[f"{moe_prefix}.down"] = _maybe_pack(f"{moe_prefix}.down", down)
                         new_weight_map[f"{moe_prefix}.down"] = shard_name
 

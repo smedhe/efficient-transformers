@@ -345,6 +345,48 @@ class TestWeightFreeCheckpointTransforms:
         torch.testing.assert_close(tensors[f"{prefix}.down"], down.view(2, 2, 2, 3).transpose(0, 1))
         torch.testing.assert_close(tensors["model.language_model.layers.0.mlp.gate.weight"], router)
 
+    def test_pipeline_splits_qwen3_vl_moe_fused_experts_from_nested_text_config(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        prefix = "model.language_model.layers.0.mlp.experts"
+        moe_prefix = "model.language_model.layers.0.mlp.moe_weights"
+        gate = torch.full((2, 3, 4), 1.0)
+        up = torch.full((2, 3, 4), 2.0)
+        gate_up = torch.cat((gate.transpose(1, 2), up.transpose(1, 2)), dim=1)
+        down = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+        router = torch.ones(2, 3, dtype=torch.float16)
+        _write_safetensors_checkpoint(
+            src,
+            {
+                f"{prefix}.gate_up_proj": gate_up,
+                f"{prefix}.down_proj": down.transpose(1, 2),
+                "model.language_model.layers.0.mlp.gate.weight": router,
+            },
+        )
+        config = SimpleNamespace(text_config=SimpleNamespace(model_type="qwen3_vl_moe", num_experts=2))
+        pipeline = CheckpointTransformPipeline(
+            [
+                MoEFusedExpertSplitCheckpointTransform,
+                DtypeConversionCheckpointTransform,
+            ]
+        )
+
+        prepared = pipeline.apply(src, out, target_dtype=torch.float32, config=config)
+
+        assert prepared == out
+        manifest = json.loads((out / CHECKPOINT_PREPARED_MANIFEST).read_text())
+        assert manifest["active_group"] == "fused_expert_split_v1"
+        tensors = _load_prepared_tensors(out)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.gate"], gate)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.up"], up)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.down"], down)
+        torch.testing.assert_close(
+            tensors["model.language_model.layers.0.mlp.gate.weight"], router.to(torch.float32)
+        )
+        assert f"{prefix}.gate_up_proj" not in tensors
+        assert f"{prefix}.down_proj" not in tensors
+
     def test_fused_split_packs_moe_weights_for_expert_parallel_prefill(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
@@ -479,6 +521,7 @@ class TestWeightFreeCheckpointTransforms:
     def test_resolver_adds_model_prefix_for_language_wrapper_keys(self):
         checkpoint_index = {
             "model.language_model.embed_tokens.weight": "model-00001-of-00013.safetensors",
+            "model.language_model.layers.0.mlp.moe_weights.gate": "model-00001-of-00013.safetensors",
             "model.language_model.layers.27.mlp.experts.down_proj": "model-00008-of-00013.safetensors",
         }
         backbone = MagicMock()
@@ -487,6 +530,10 @@ class TestWeightFreeCheckpointTransforms:
         assert (
             find_checkpoint_key("language_model.embed_tokens.weight", checkpoint_index, backbone)
             == "model.language_model.embed_tokens.weight"
+        )
+        assert (
+            find_checkpoint_key("language_model.layers.0.mlp.moe_weights.gate", checkpoint_index, backbone)
+            == "model.language_model.layers.0.mlp.moe_weights.gate"
         )
         assert (
             find_checkpoint_key("language_model.layers.27.mlp.experts.down_proj", checkpoint_index, backbone)
