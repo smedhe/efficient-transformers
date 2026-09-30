@@ -57,7 +57,7 @@ _DISABLE_EXPORT_FP16_CLAMP = False
 
 
 def _is_onnx_export() -> bool:
-    return torch.onnx.is_in_onnx_export()
+    return torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling()
 
 
 def _clamp_to_fp16_range(hidden_states: torch.Tensor) -> torch.Tensor:

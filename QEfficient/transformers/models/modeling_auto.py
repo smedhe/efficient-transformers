@@ -4436,7 +4436,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
                 bound_args = model_forward_sig.bind_partial(*args, **kwargs)
                 outputs = model_forward(*bound_args.args, **bound_args.kwargs)
-                if torch.onnx.is_in_onnx_export():
+                if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
                     if hasattr(outputs, "logits") and hasattr(outputs, "past_key_values"):
                         return outputs.logits, _legacyify_cache(outputs.past_key_values)
                     return _legacyify_cache(outputs)

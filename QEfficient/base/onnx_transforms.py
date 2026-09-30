@@ -1264,8 +1264,8 @@ class OnnxTransformPipeline(BaseOnnxTransform):
         if PreserveNestedCacheRetainedStateTransform in requested:
             applied[PreserveNestedCacheRetainedStateTransform] = PreserveNestedCacheRetainedStateTransform.apply(model)
 
-        if DeduplicateRepeatedSubgraphTransform in requested:
-            applied[DeduplicateRepeatedSubgraphTransform] = DeduplicateRepeatedSubgraphTransform.apply(model, **kwargs)
+        # if DeduplicateRepeatedSubgraphTransform in requested:
+        #     applied[DeduplicateRepeatedSubgraphTransform] = DeduplicateRepeatedSubgraphTransform.apply(model, **kwargs)
 
         if RenameRepeatedSubgraphTransform in requested:
             applied[RenameRepeatedSubgraphTransform] = RenameRepeatedSubgraphTransform.apply(model, **kwargs)

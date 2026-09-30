@@ -1595,7 +1595,7 @@ class QEffQwen3_5VisionModel(Qwen3_5VisionModel):
         if num_frames > 1:
             coords = coords.repeat(num_frames, 1)
 
-        coords = coords.repeat(bs, 1)
+        coords = coords.repeat(_bs, 1)
         embeddings = freq_table[coords]
         embeddings = embeddings.flatten(1)
         return embeddings

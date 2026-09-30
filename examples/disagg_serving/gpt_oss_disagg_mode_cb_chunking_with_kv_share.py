@@ -34,9 +34,9 @@ DEFAULT_FULL_BATCH_SIZE = 4
 
 NUM_CORES = 16
 MOE_PREFILL_PACKED_CHUNK_SIZE = 256
-STAGES = 4
-PREFILL_NUM_DEVICES = 8
-DECODE_NUM_DEVICES = 4
+STAGES = 2
+PREFILL_NUM_DEVICES = 2
+DECODE_NUM_DEVICES = 1
 
 
 def _build_config(model_id: str, num_hidden_layers: int = None):
@@ -120,7 +120,7 @@ def run(
 
     config = _build_config(model_id, num_hidden_layers)
     from_pretrained_kwargs = {"config": config} if config is not None else {}
-    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, continuous_batching=True, **from_pretrained_kwargs)
+    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, continuous_batching=True,weight_free=True, **from_pretrained_kwargs)
     prefill_session, decode_session = _compile_sessions(
         qeff_model,
         prefill_seq_len,

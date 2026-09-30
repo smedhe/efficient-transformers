@@ -185,7 +185,7 @@ def blocked_kv_attention_forward(
     )
     current_denominator = torch.zeros(batch_size, num_heads, seq_len, device=query.device, dtype=query.dtype)
 
-    if torch.onnx.is_in_onnx_export():
+    if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
         attention_mask = None
         use_causal_mask = True
     position_ids = cache_kwargs.get("position_ids")
@@ -1160,7 +1160,7 @@ def blocked_qkv_attention_forward(
     if ctx_len is None:
         raise ValueError("`ctx_len` is required for blocked QKV attention.")
     past_seen_tokens = ctx_len
-    if torch.onnx.is_in_onnx_export():
+    if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
         attention_mask = None
         use_causal_mask = True
     position_ids = cache_kwargs.get("position_ids")
@@ -1204,7 +1204,7 @@ def blocked_qkv_attention_forward(
         if skip_kv:
             skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
             # Eager mode Only
-            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
 
@@ -1331,7 +1331,7 @@ def blocked_hqkv_attention_forward(
     if ctx_len is None:
         raise ValueError("`ctx_len` is required for blocked HQKV attention.")
     past_seen_tokens = ctx_len
-    if torch.onnx.is_in_onnx_export():
+    if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
         attention_mask = None
         use_causal_mask = True
     position_ids = cache_kwargs.get("position_ids")
@@ -1376,7 +1376,7 @@ def blocked_hqkv_attention_forward(
         if skip_kv:
             skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
             # Eager mode Only
-            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
 
@@ -1521,7 +1521,7 @@ def blocked_bhqkv_attention_forward(
     if ctx_len is None:
         raise ValueError("`ctx_len` is required for blocked BHQKV attention.")
     past_seen_tokens = ctx_len
-    if torch.onnx.is_in_onnx_export():
+    if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
         attention_mask = None
         use_causal_mask = True
     position_ids = cache_kwargs.get("position_ids")
@@ -1573,7 +1573,7 @@ def blocked_bhqkv_attention_forward(
         if skip_kv:
             skip_future = (torch.tensor(start_index, device=query.device) > current_position).all()
             # Eager mode Only
-            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing():
+            if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break
 

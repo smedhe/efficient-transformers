@@ -13,10 +13,9 @@ import torch
 from transformers.cache_utils import Cache, CacheLayerMixin, EncoderDecoderCache
 
 from QEfficient.customop import (
-    CtxChunkScatterBatchFunc,
-    CtxGatherFuncBlockedKVBatch,
     CtxGatherFuncPagedAttention,  # TODO: apply the dynamo related changes coming from latest mainline
     CtxScatterFuncPagedAttention,  # TODO: apply the dynamo related changes coming from latest mainline
+    ctx_chunk_scatter_batch,
     ctx_gather,
     ctx_gather_3d,
     ctx_gather_blocked_kv,
