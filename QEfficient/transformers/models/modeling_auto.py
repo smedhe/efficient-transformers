@@ -40,6 +40,7 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DtypeConversionCheckpointTransform,
     ExpertParallelPackingCheckpointTransform,
     GptOssMxfp4ExpertDequantSplitCheckpointTransform,
+    MoEExpertParallelCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
 )
@@ -1147,11 +1148,11 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
     _onnx_transforms = []
 
     _checkpoint_transforms = [
-        MoEExpertParallelCheckpointTransform,
-        GptOssMxfp4ExpertDequantSplitCheckpointTransform,
-        MoEExpertStackingCheckpointTransform,
-        MoEFusedExpertSplitCheckpointTransform,
-        GraniteMoeFusedExpertSplitCheckpointTransform,
+        # MoEExpertParallelCheckpointTransform,
+        # GptOssMxfp4ExpertDequantSplitCheckpointTransform,
+        # MoEExpertStackingCheckpointTransform,
+        # MoEFusedExpertSplitCheckpointTransform,
+        # GraniteMoeFusedExpertSplitCheckpointTransform,
         DtypeConversionCheckpointTransform,
     ]
 
@@ -1301,7 +1302,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
-        GraniteMoeFusedExpertSplitCheckpointTransform,
+        ExpertParallelPackingCheckpointTransform,
         DtypeConversionCheckpointTransform,
     ]
 
@@ -3556,6 +3557,7 @@ class QEFFAutoModelForImageTextToText:
             validate_dynamo_export_requirements("weight_free=True")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
+        fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
 
         # TODO: add a check to see if kv_offload is allowed for given model by loading the config and checking architecture or type of config here.
         if continuous_batching and not kv_offload:
@@ -3591,9 +3593,9 @@ class QEFFAutoModelForImageTextToText:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
-
         if fp8_retain_weights:
             kwargs["fp8_retain_weights"] = fp8_retain_weights
+
         instance = cls(
             model,
             kv_offload=kv_offload,

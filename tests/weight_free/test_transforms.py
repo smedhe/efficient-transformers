@@ -55,7 +55,6 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
     ExpertParallelPackingCheckpointTransform,
     GptOssMxfp4ExpertDequantSplitCheckpointTransform,
     GraniteMoeFusedExpertSplitCheckpointTransform,
-    MoEExpertParallelCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
 )
@@ -804,6 +803,37 @@ class TestWeightFreeCheckpointTransforms:
                 torch.float32,
                 max_ram_bytes=10,
             )
+
+    def test_splits_qwen3_vl_moe_dim2_fused_experts_without_bias_to_moe_weights(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        prefix = "model.language_model.layers.0.mlp.experts"
+        moe_prefix = "model.language_model.layers.0.mlp.moe_weights"
+        gate = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        up = gate + 100
+        gate_up = torch.cat((gate, up), dim=2)
+        down = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+        _write_safetensors_checkpoint(
+            src,
+            {
+                f"{prefix}.gate_up_proj": gate_up,
+                f"{prefix}.down_proj": down,
+            },
+        )
+
+        pipeline = CheckpointTransformPipeline([MoEFusedExpertSplitCheckpointTransform])
+        pipeline.apply(
+            src,
+            out,
+            target_dtype=torch.float32,
+            config=SimpleNamespace(num_local_experts=2),
+        )
+
+        tensors = _load_prepared_tensors(out)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.gate"], gate)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.up"], up)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.down"], down)
 
     def test_splits_dim2_fused_experts_with_bias_to_moe_weights(self, tmp_path):
         src = tmp_path / "src"
