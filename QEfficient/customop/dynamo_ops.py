@@ -8,15 +8,20 @@
 import torch
 
 from QEfficient.customop.ctx_scatter_gather import (  # noqa: E402
+    CtxChunkScatterBatch,
     CtxGather,
     CtxGather3D,
     CtxGatherBlockedKV,
+    CtxGatherBlockedKVBatch,
     CtxGatherBlockedKVDP,
     CtxGatherBlockRangeKVDP,
+    CtxGatherPagedAttention,
+    CtxGatherPagedKVDP,
     CtxPagedScatterDP,
     CtxScatter,
     CtxScatter3D,
     CtxScatter3DInt,
+    CtxScatterPagedAttention,
     M3CtxScatter,
 )
 from QEfficient.customop.ctx_scatter_gather_cb import (  # noqa: E402
@@ -61,6 +66,32 @@ def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> 
     return torch.empty_like(data)
 
 
+@torch.library.custom_op("qefficient::ctx_scatter_paged_attention", mutates_args=())
+def ctx_scatter_paged_attention_op(
+    data: torch.Tensor,
+    block_index: torch.Tensor,
+    position_ids: torch.Tensor,
+    updates: torch.Tensor,
+) -> torch.Tensor:
+    """Scatter updates into a paged-attention cache."""
+    result = data.clone()
+    block_index = block_index.view(-1, 1, 1)
+    head_idx = torch.arange(result.shape[1], device=result.device).view(1, -1, 1)
+    ctx_idx = position_ids.unsqueeze(1)
+    result[block_index, head_idx, ctx_idx] = updates
+    return result
+
+
+@ctx_scatter_paged_attention_op.register_fake
+def _(
+    data: torch.Tensor,
+    block_index: torch.Tensor,
+    position_ids: torch.Tensor,
+    updates: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty_like(data)
+
+
 @torch.library.custom_op("qefficient::ctx_scatter_3d", mutates_args=())
 def ctx_scatter_3d_op(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     """Custom 3D context scatter operation"""
@@ -75,6 +106,26 @@ def ctx_scatter_3d_op(data: torch.Tensor, position_ids: torch.Tensor, updates: t
 @ctx_scatter_3d_op.register_fake
 def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     """Fake implementation for torch.export - just returns data tensor with same shape/dtype"""
+    return torch.empty_like(data)
+
+
+@torch.library.custom_op("qefficient::ctx_chunk_scatter_batch", mutates_args=())
+def ctx_chunk_scatter_batch_op(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    """Scatter batch-folded updates into a cache laid out as [1, B*H, T, D]."""
+    batch_size, num_heads, seq_len, _ = updates.shape
+    batch_idx = torch.arange(batch_size, device=data.device).view(batch_size, 1, 1)
+    batch_idx = batch_idx.expand(batch_size, num_heads, seq_len)
+    head_idx = torch.arange(num_heads, device=data.device).view(1, num_heads, 1)
+    head_idx = head_idx.expand(batch_size, num_heads, seq_len)
+    head_flat_idx = batch_idx * num_heads + head_idx
+    position_idx = position_ids.long().unsqueeze(1).expand(batch_size, num_heads, seq_len)
+    result = data.clone()
+    result[0, head_flat_idx, position_idx] = updates
+    return result
+
+
+@ctx_chunk_scatter_batch_op.register_fake
+def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(data)
 
 
@@ -298,6 +349,44 @@ def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
     return torch.empty(out_shape, dtype=data.dtype, device=data.device)
 
 
+@torch.library.custom_op("qefficient::ctx_gather_blocked_kv_batch", mutates_args=())
+def ctx_gather_blocked_kv_batch_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    """Gather from a batch-folded cache laid out as [1, B*H, T, D]."""
+    num_heads = data.shape[1]
+    ctx_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+    head_idx = torch.arange(num_heads, device=data.device).view(num_heads, 1)
+    return data[0, head_idx, ctx_indices[0]].unsqueeze(0)
+
+
+@ctx_gather_blocked_kv_batch_op.register_fake
+def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    return torch.empty(
+        (data.shape[0], data.shape[1], ctx_indices.shape[-1], *data.shape[3:]),
+        dtype=data.dtype,
+        device=data.device,
+    )
+
+
+@torch.library.custom_op("qefficient::ctx_gather_paged_attention", mutates_args=())
+def ctx_gather_paged_attention_op(
+    data: torch.Tensor, block_indices: torch.Tensor, ctx_indices: torch.Tensor
+) -> torch.Tensor:
+    """Gather valid KV values from a paged-attention cache."""
+    block_indices = block_indices.view(-1, 1, 1)
+    head_indices = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+    ctx_indices = ctx_indices.unsqueeze(1)
+    return data[block_indices, head_indices, ctx_indices]
+
+
+@ctx_gather_paged_attention_op.register_fake
+def _(data: torch.Tensor, block_indices: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    return torch.empty(
+        (block_indices.shape[0], data.shape[1], ctx_indices.shape[-1], *data.shape[3:]),
+        dtype=data.dtype,
+        device=data.device,
+    )
+
+
 # GATHER BLOCKED KV CB (with batch_index)
 @torch.library.custom_op("qefficient::ctx_gather_blocked_kv_cb", mutates_args=())
 def ctx_gather_blocked_kv_cb_op(
@@ -411,6 +500,28 @@ def _(data: torch.Tensor, block_id: torch.Tensor, addr: torch.Tensor, updates: t
     return torch.empty_like(data)
 
 
+@torch.library.custom_op("qefficient::ctx_gather_paged_kv_dp", mutates_args=())
+def ctx_gather_paged_kv_dp_op(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+    """Assemble contiguous KV values from a DP/CP-layout physical page pool."""
+    block_ids = torch.where(block_ids == torch.iinfo(torch.int32).max, 0, block_ids)
+    num_pages, rows = block_ids.shape
+    _, data_rows, page_size, head_dim = data.shape
+    if rows != data_rows:
+        raise ValueError("Paged GQA gather block-id rows must match pool rows.")
+    row_idx = torch.arange(rows, device=data.device).view(1, rows)
+    pages = data[block_ids.long(), row_idx]
+    return pages.permute(1, 0, 2, 3).reshape(1, rows, num_pages * page_size, head_dim)
+
+
+@ctx_gather_paged_kv_dp_op.register_fake
+def _(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+    return torch.empty(
+        (1, data.shape[1], block_ids.shape[0] * data.shape[2], *data.shape[3:]),
+        dtype=data.dtype,
+        device=data.device,
+    )
+
+
 @torch.library.custom_op("qefficient::ctx_gather_blocked_kv_dp", mutates_args=())
 def ctx_gather_blocked_kv_dp_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
     """Gather a blocked KV range from a DP/CP-layout cache."""
@@ -455,7 +566,9 @@ def _(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
 DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.rms_norm.default: get_dynamo_onnxscript_func(CustomRMSNorm),
     torch.ops.qefficient.ctx_scatter.default: get_dynamo_onnxscript_func(CtxScatter),
+    torch.ops.qefficient.ctx_scatter_paged_attention.default: get_dynamo_onnxscript_func(CtxScatterPagedAttention),
     torch.ops.qefficient.ctx_scatter_3d.default: get_dynamo_onnxscript_func(CtxScatter3D),
+    torch.ops.qefficient.ctx_chunk_scatter_batch.default: get_dynamo_onnxscript_func(CtxChunkScatterBatch),
     torch.ops.qefficient.ctx_scatter_cb.default: get_dynamo_onnxscript_func(CtxScatterCB),
     torch.ops.qefficient.ctx_scatter_cb_3d.default: get_dynamo_onnxscript_func(CtxScatterCB3D),
     torch.ops.qefficient.ctx_scatter_3d_int.default: get_dynamo_onnxscript_func(CtxScatter3DInt),
@@ -466,7 +579,10 @@ DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.ctx_gather_cb.default: get_dynamo_onnxscript_func(CtxGatherCB),
     torch.ops.qefficient.ctx_gather_cb_3d.default: get_dynamo_onnxscript_func(CtxGatherCB3D),
     torch.ops.qefficient.ctx_gather_blocked_kv.default: get_dynamo_onnxscript_func(CtxGatherBlockedKV),
+    torch.ops.qefficient.ctx_gather_blocked_kv_batch.default: get_dynamo_onnxscript_func(CtxGatherBlockedKVBatch),
+    torch.ops.qefficient.ctx_gather_paged_attention.default: get_dynamo_onnxscript_func(CtxGatherPagedAttention),
     torch.ops.qefficient.ctx_paged_scatter_dp.default: get_dynamo_onnxscript_func(CtxPagedScatterDP),
+    torch.ops.qefficient.ctx_gather_paged_kv_dp.default: get_dynamo_onnxscript_func(CtxGatherPagedKVDP),
     torch.ops.qefficient.ctx_gather_blocked_kv_dp.default: get_dynamo_onnxscript_func(CtxGatherBlockedKVDP),
     torch.ops.qefficient.ctx_gather_block_range_kv_dp.default: get_dynamo_onnxscript_func(CtxGatherBlockRangeKVDP),
     torch.ops.qefficient.ctx_gather_blocked_kv_cb.default: get_dynamo_onnxscript_func(CtxGatherBlockedKVCB),

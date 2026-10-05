@@ -37,13 +37,15 @@ from QEfficient.blocking.attention_blocking import (
     BlockingMode,
     generic_blocked_attention_interface,
 )
-from QEfficient.customop import CtxGatherFuncBlockedKV, CtxGatherFuncPagedKVDP, CtxPagedScatterFuncDP, M3CtxScatterFunc
 from QEfficient.customop.utils import (
     ctx_gather_3d,
     ctx_gather_block_range_kv_dp,
+    ctx_gather_blocked_kv,
     ctx_gather_blocked_kv_dp,
+    ctx_gather_paged_kv_dp,
     ctx_paged_scatter_dp,
     ctx_scatter_3d,
+    m3_ctx_scatter,
 )
 from QEfficient.transformers.cache_utils import (
     QEffDynamicCache,
@@ -333,7 +335,7 @@ def _gather_paged_kv_selected_heads(pool: torch.Tensor, physical_ids: torch.Tens
     gathered = []
     for batch_idx in range(batch):
         block_ids = physical_ids[batch_idx].transpose(0, 1).contiguous().to(torch.int32)
-        pages = CtxGatherFuncPagedKVDP.apply(pool, block_ids)
+        pages = ctx_gather_paged_kv_dp(pool, block_ids)
         gathered.append(pages.squeeze(0).view(heads, num_pages, pool.shape[2], pool.shape[3]))
     return torch.stack(gathered, dim=0)
 
@@ -477,7 +479,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         block_ids_by_row = (
             block_ids_per_page.transpose(0, 1).unsqueeze(2).expand(num_pages, DP, Hkv).reshape(num_pages, rows)
         )
-        return CtxGatherFuncPagedKVDP.apply(pool, block_ids_by_row.to(torch.int32))
+        return ctx_gather_paged_kv_dp(pool, block_ids_by_row.to(torch.int32))
 
     def _read_index_paged_kv_dp(
         self,
@@ -495,7 +497,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         block_ids_by_row = (
             block_ids_per_page.transpose(0, 1).unsqueeze(2).expand(num_pages, dp, rows_per_dp).reshape(num_pages, rows)
         )
-        return CtxGatherFuncPagedKVDP.apply(index_key_cache, block_ids_by_row.to(torch.int32))
+        return ctx_gather_paged_kv_dp(index_key_cache, block_ids_by_row.to(torch.int32))
 
     def _read_blocked_k_core(
         self,
@@ -524,7 +526,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         invalid = offsets > position_max[:, :, None]
         invalid_value = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
         offsets = torch.where(invalid, _scalar_like(offsets, invalid_value), offsets)
-        gathered = CtxGatherFuncBlockedKV.apply(index_key_cache, offsets.reshape(batch_local, 1, block_len))
+        gathered = ctx_gather_blocked_kv(index_key_cache, offsets.reshape(batch_local, 1, block_len))
         return gathered.reshape(batch_local, num_cores, tokens_per_core, head_dim)
 
     def _write_msa_paged_prefill_cache(
@@ -552,7 +554,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         physical_page = torch.gather(block_table[0].to(torch.int64), 1, logical_page).to(torch.int32)
         block_ids = physical_page.unsqueeze(1).expand(batch, rows, query_len)
         addresses = (position_ids % page_size).to(torch.int32).unsqueeze(1).expand_as(block_ids)
-        return CtxPagedScatterFuncDP.apply(cache, block_ids, addresses, updates)
+        return ctx_paged_scatter_dp(cache, block_ids, addresses, updates)
 
     def _read_msa_prefill_paged_block(
         self,
@@ -579,7 +581,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                 .view(-1, 1)
                 .expand(page_end - page_start + 1, index_key_cache.shape[1])
             )
-            pages = CtxGatherFuncPagedKVDP.apply(index_key_cache, ids).squeeze(0)
+            pages = ctx_gather_paged_kv_dp(index_key_cache, ids).squeeze(0)
             block_len = end_index - start_index
             block = pages[:, :block_len]
             if position_max is not None:
@@ -723,7 +725,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         idx_q = self._apply_rope(idx_q, cos, sin)
         idx_k = self._apply_rope(idx_k, cos, sin)
         if paged_block_table is None:
-            index_key_cache = M3CtxScatterFunc.apply(index_key_cache, position_ids.to(torch.int32), idx_k)
+            index_key_cache = m3_ctx_scatter(index_key_cache, position_ids.to(torch.int32), idx_k)
         else:
             index_key_cache = self._write_msa_paged_prefill_cache(
                 index_key_cache,
@@ -1229,7 +1231,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         block_id = torch.where(row_live, block_id_dp, torch.iinfo(torch.int32).max).reshape(
             batch_local, rows, query_len
         )
-        index_key_cache = CtxPagedScatterFuncDP.apply(index_key_cache, block_id, addr, k_updates)
+        index_key_cache = ctx_paged_scatter_dp(index_key_cache, block_id, addr, k_updates)
 
         q_heads_per_kv = num_index_heads // hkv
         ql_eff = q_heads_per_kv * query_len
@@ -1286,7 +1288,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                 logical_page_groups = logical_page_groups_for_block(block_idx)
                 page_groups_by_row = logical_page_groups.reshape(1, -1).expand(rows, -1)
                 physical_pages_by_row = torch.gather(table_rows, 1, page_groups_by_row)
-                key_flat = CtxGatherFuncPagedKVDP.apply(
+                key_flat = ctx_gather_paged_kv_dp(
                     index_key_cache,
                     physical_pages_by_row.transpose(0, 1).contiguous().to(torch.int32),
                 )
@@ -1917,7 +1919,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         idx_q = self._apply_rope(idx_q, cos, sin)
         idx_k = self._apply_rope(idx_k, cos, sin)
         if paged_block_table is None:
-            index_key_cache = M3CtxScatterFunc.apply(index_key_cache, position_ids.to(torch.int32), idx_k)
+            index_key_cache = m3_ctx_scatter(index_key_cache, position_ids.to(torch.int32), idx_k)
         else:
             index_key_cache = self._write_msa_paged_prefill_cache(
                 index_key_cache,
@@ -2153,8 +2155,8 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             int(cfg.head_dim * cfg.rope_parameters.get("partial_rotary_factor", 1.0)),
         )
         if paged_block_table is None:
-            key_cache = M3CtxScatterFunc.apply(key_cache, position_ids.to(torch.int32), k)
-            value_cache = M3CtxScatterFunc.apply(value_cache, position_ids.to(torch.int32), v)
+            key_cache = m3_ctx_scatter(key_cache, position_ids.to(torch.int32), k)
+            value_cache = m3_ctx_scatter(value_cache, position_ids.to(torch.int32), v)
         else:
             if (getattr(blocking_config, "msa_attn_dp", 1) or 1) != 1 or (
                 getattr(blocking_config, "msa_attn_cp", 1) or 1
@@ -2184,8 +2186,8 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             physical_page = torch.gather(paged_block_table.to(torch.int64), 1, logical_page).to(torch.int32)
             block_ids = physical_page.unsqueeze(1).expand(batch, num_kv_heads, query_len)
             addresses = (position_ids % page_size).to(torch.int32).unsqueeze(1).expand_as(block_ids)
-            key_cache = CtxPagedScatterFuncDP.apply(key_cache, block_ids, addresses, k)
-            value_cache = CtxPagedScatterFuncDP.apply(value_cache, block_ids, addresses, v)
+            key_cache = ctx_paged_scatter_dp(key_cache, block_ids, addresses, k)
+            value_cache = ctx_paged_scatter_dp(value_cache, block_ids, addresses, v)
 
         q = q.reshape(batch, num_kv_heads, n_rep, query_len, cfg.head_dim)
         offsets = torch.arange(block_size, device=hidden_states.device).view(1, 1, 1, 1, 1, block_size)
@@ -2369,7 +2371,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
 
                 if paged_block_table is None:
                     key_block = (
-                        CtxGatherFuncBlockedKV.apply(key_cache, gather_positions)
+                        ctx_gather_blocked_kv(key_cache, gather_positions)
                         .reshape(
                             batch,
                             num_kv_heads,
@@ -2388,7 +2390,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                         .float()
                     )
                     value_block = (
-                        CtxGatherFuncBlockedKV.apply(value_cache, gather_positions)
+                        ctx_gather_blocked_kv(value_cache, gather_positions)
                         .reshape(
                             batch,
                             num_kv_heads,
@@ -3048,9 +3050,9 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 physical_block_ids,
                 torch.zeros_like(physical_block_ids),
             )
-            # CtxGatherFuncPagedKVDP expects [selected_pages, rows].
+            # ctx_gather_paged_kv_dp expects [selected_pages, rows].
             block_ids = physical_block_ids.transpose(0, 1).contiguous()
-            selected_k = CtxGatherFuncPagedKVDP.apply(key_cache, block_ids.to(torch.int32))
+            selected_k = ctx_gather_paged_kv_dp(key_cache, block_ids.to(torch.int32))
             # Each core owns one Q head and receives a physical copy of the
             # complete selected KV sequence.
             # selected_k: [local, DP*CP*Hkv, C, selected_len, D]
@@ -3072,7 +3074,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             exp_core = torch.exp(attn - max_core.unsqueeze(-1))
             exp_core = torch.where(valid_core.unsqueeze(3), exp_core, torch.zeros_like(exp_core))
             selected_v = (
-                CtxGatherFuncPagedKVDP.apply(value_cache, block_ids.to(torch.int32))
+                ctx_gather_paged_kv_dp(value_cache, block_ids.to(torch.int32))
                 .view(
                     local,
                     rows,
@@ -3251,13 +3253,13 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     .expand(batch_local, attn_dp, attn_cp, self.config.num_key_value_heads, -1, self.head_dim)
                     .reshape(batch_local, attn_dp * attn_cp * self.config.num_key_value_heads, -1, self.head_dim)
                 )
-                layer.keys = CtxPagedScatterFuncDP.apply(
+                layer.keys = ctx_paged_scatter_dp(
                     key_cache,
                     block_id.reshape(batch_local, -1, key_states.shape[2]).to(torch.int32),
                     addr.reshape(batch_local, -1, key_states.shape[2]),
                     updates_k,
                 )
-                layer.values = CtxPagedScatterFuncDP.apply(
+                layer.values = ctx_paged_scatter_dp(
                     value_cache,
                     block_id.reshape(batch_local, -1, key_states.shape[2]).to(torch.int32),
                     addr.reshape(batch_local, -1, key_states.shape[2]),

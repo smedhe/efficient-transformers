@@ -30,6 +30,16 @@ def ctx_scatter(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.T
     return select_interface(CtxScatterFunc.apply, torch.ops.qefficient.ctx_scatter)(data, position_ids, updates)
 
 
+def ctx_scatter_paged_attention(
+    data: torch.Tensor, block_index: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor
+) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterFuncPagedAttention
+
+    return select_interface(CtxScatterFuncPagedAttention.apply, torch.ops.qefficient.ctx_scatter_paged_attention)(
+        data, block_index, position_ids, updates
+    )
+
+
 def ctx_scatter_3d(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc3D
 
@@ -48,6 +58,14 @@ def ctx_scatter_3d_int(data: torch.Tensor, position_ids: torch.Tensor, updates: 
     from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc3DInt
 
     return select_interface(CtxScatterFunc3DInt.apply, torch.ops.qefficient.ctx_scatter_3d_int)(
+        data, position_ids, updates
+    )
+
+
+def ctx_chunk_scatter_batch(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxChunkScatterBatchFunc
+
+    return select_interface(CtxChunkScatterBatchFunc.apply, torch.ops.qefficient.ctx_chunk_scatter_batch)(
         data, position_ids, updates
     )
 
@@ -78,6 +96,24 @@ def ctx_gather_blocked_kv(data: torch.Tensor, ctx_indices: torch.Tensor) -> torc
     return select_interface(CtxGatherFuncBlockedKV.apply, torch.ops.qefficient.ctx_gather_blocked_kv)(data, ctx_indices)
 
 
+def ctx_gather_blocked_kv_batch(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKVBatch
+
+    return select_interface(CtxGatherFuncBlockedKVBatch.apply, torch.ops.qefficient.ctx_gather_blocked_kv_batch)(
+        data, ctx_indices
+    )
+
+
+def ctx_gather_paged_attention(
+    data: torch.Tensor, block_indices: torch.Tensor, ctx_indices: torch.Tensor
+) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncPagedAttention
+
+    return select_interface(CtxGatherFuncPagedAttention.apply, torch.ops.qefficient.ctx_gather_paged_attention)(
+        data, block_indices, ctx_indices
+    )
+
+
 def ctx_paged_scatter_dp(
     data: torch.Tensor, block_id: torch.Tensor, addr: torch.Tensor, updates: torch.Tensor
 ) -> torch.Tensor:
@@ -94,6 +130,12 @@ def ctx_gather_blocked_kv_dp(data: torch.Tensor, ctx_indices: torch.Tensor) -> t
     return select_interface(CtxGatherFuncBlockedKVDP.apply, torch.ops.qefficient.ctx_gather_blocked_kv_dp)(
         data, ctx_indices
     )
+
+
+def ctx_gather_paged_kv_dp(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncPagedKVDP
+
+    return select_interface(CtxGatherFuncPagedKVDP.apply, torch.ops.qefficient.ctx_gather_paged_kv_dp)(data, block_ids)
 
 
 def ctx_gather_block_range_kv_dp(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:

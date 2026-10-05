@@ -45,11 +45,7 @@ def test_align_retained_state_output_shapes_copies_full_input_contract():
         [helper.make_node("Identity", ["past_key.1"], ["past_key.1_InternalRetainedState"])],
         "retained-state-shape-alignment",
         [helper.make_tensor_value_info("past_key.1", TensorProto.FLOAT, input_shape)],
-        [
-            helper.make_tensor_value_info(
-                "past_key.1_InternalRetainedState", TensorProto.FLOAT, generated_output_shape
-            )
-        ],
+        [helper.make_tensor_value_info("past_key.1_InternalRetainedState", TensorProto.FLOAT, generated_output_shape)],
     )
     model = helper.make_model(graph)
 
