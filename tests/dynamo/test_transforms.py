@@ -35,6 +35,7 @@ from QEfficient.base.onnx_transforms import (
     PruneFakeInitializersTransform,
     RenameRepeatedSubgraphTransform,
 )
+from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils import export_subfunctions
@@ -56,6 +57,69 @@ class _InterpreterSpy:
 
     def run(self, *operands):
         return self.graph_module(*operands)
+
+
+def test_minimax_ctx_scatter_gather_ops_have_fake_kernels_and_translations():
+    def float_tensor(*shape):
+        return torch.empty(shape, dtype=torch.float32, device="meta")
+
+    def int_tensor(*shape):
+        return torch.empty(shape, dtype=torch.int32, device="meta")
+
+    cases = (
+        (
+            torch.ops.qefficient.ctx_scatter_paged_attention.default,
+            (float_tensor(4, 2, 8, 3), int_tensor(2, 1), int_tensor(2, 2), float_tensor(2, 2, 2, 3)),
+            (4, 2, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_chunk_scatter_batch.default,
+            (float_tensor(1, 4, 8, 3), int_tensor(2, 2), float_tensor(2, 2, 2, 3)),
+            (1, 4, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_blocked_kv_batch.default,
+            (float_tensor(1, 4, 8, 3), int_tensor(1, 4, 5)),
+            (1, 4, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_paged_attention.default,
+            (float_tensor(4, 2, 8, 3), int_tensor(2, 1), int_tensor(2, 5)),
+            (2, 2, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_paged_kv_dp.default,
+            (float_tensor(8, 4, 16, 3), int_tensor(2, 4)),
+            (1, 4, 32, 3),
+        ),
+        (
+            torch.ops.qefficient.m3_ctx_scatter.default,
+            (float_tensor(2, 1, 8, 3), int_tensor(2, 2), float_tensor(2, 1, 2, 3)),
+            (2, 1, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_paged_scatter_dp.default,
+            (float_tensor(8, 4, 16, 3), int_tensor(1, 4, 2), int_tensor(1, 4, 2), float_tensor(1, 4, 2, 3)),
+            (8, 4, 16, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_blocked_kv_dp.default,
+            (float_tensor(2, 4, 8, 3), int_tensor(2, 4, 5)),
+            (2, 4, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_block_range_kv_dp.default,
+            (float_tensor(2, 4, 6, 8, 3), int_tensor(2, 4, 2)),
+            (2, 4, 2, 8, 3),
+        ),
+    )
+
+    for op, args, expected_shape in cases:
+        assert op in DYNAMO_CUSTOM_OP_TABLE
+        output = op(*args)
+        assert output.shape == expected_shape
+        assert output.dtype == torch.float32
+        assert output.device.type == "meta"
 
 
 def test_preserve_subfunction_source_lines_interprets_graph_modules(monkeypatch):

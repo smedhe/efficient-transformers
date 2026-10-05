@@ -13,25 +13,23 @@ import torch
 from transformers.cache_utils import Cache, CacheLayerMixin, EncoderDecoderCache
 
 from QEfficient.customop import (
-    CtxChunkScatterBatchFunc,
-    CtxGatherFuncBlockedKVBatch,
-    CtxGatherFuncPagedAttention,  # TODO: apply the dynamo related changes coming from latest mainline
-    CtxScatterFuncPagedAttention,  # TODO: apply the dynamo related changes coming from latest mainline
-    CtxGatherFuncBlockedKVDP,
+    ctx_chunk_scatter_batch,
     ctx_gather,
     ctx_gather_3d,
     ctx_gather_blocked_kv,
+    ctx_gather_blocked_kv_batch,
     ctx_gather_blocked_kv_cb,
+    ctx_gather_blocked_kv_dp,
     ctx_gather_cb,
     ctx_gather_cb_3d,
+    ctx_gather_paged_attention,
+    ctx_paged_scatter_dp,
     ctx_scatter,
     ctx_scatter_3d,
     ctx_scatter_cb,
     ctx_scatter_cb_3d,
+    ctx_scatter_paged_attention,
     m3_ctx_scatter,
-)
-from QEfficient.customop import (
-    CtxPagedScatterFuncDP as CtxPagedScatterFunc,
 )
 
 
@@ -369,7 +367,7 @@ class QEffDynamicLayer(CacheLayerMixin):
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
 
         ctx_indices = ctx_indices.expand(1, cache_bh, T_block)
-        k_out = CtxGatherFuncBlockedKVBatch.apply(k_out, ctx_indices)
+        k_out = ctx_gather_blocked_kv_batch(k_out, ctx_indices)
 
         return k_out
 
@@ -451,7 +449,7 @@ class QEffDynamicLayer(CacheLayerMixin):
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
 
         ctx_indices = ctx_indices.expand(1, cache_bh, T_block)
-        v_out = CtxGatherFuncBlockedKVBatch.apply(v_out, ctx_indices)
+        v_out = ctx_gather_blocked_kv_batch(v_out, ctx_indices)
 
         v_out = torch.where(invalid_mask.unsqueeze(-1), torch.zeros_like(v_out, dtype=v_out.dtype), v_out)
         return v_out
@@ -538,8 +536,8 @@ class QEffDynamicLayer(CacheLayerMixin):
         invalid_idx_value = InvalidIndexProvider._get_invalid_idx_value()
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
 
-        k_out = CtxGatherFuncPagedAttention.apply(k_out, block_indices, ctx_indices)
-        v_out = CtxGatherFuncPagedAttention.apply(v_out, block_indices, ctx_indices)
+        k_out = ctx_gather_paged_attention(k_out, block_indices, ctx_indices)
+        v_out = ctx_gather_paged_attention(v_out, block_indices, ctx_indices)
 
         v_out = torch.where((invalid_mask.unsqueeze(1)).unsqueeze(-1), torch.tensor(0.0, dtype=torch.float32), v_out)
         return k_out, v_out
@@ -588,8 +586,8 @@ class QEffDynamicLayer(CacheLayerMixin):
             block_id = block_table[rows, block_index].unsqueeze(-1)
             ctx_indices = torch.where(block_id < 0, invalid_scatter_index, ctx_indices)
             block_id = block_id.unsqueeze(-1)
-            self.keys = CtxScatterFuncPagedAttention.apply(self.keys, block_id, ctx_indices, key_states)
-            self.values = CtxScatterFuncPagedAttention.apply(self.values, block_id, ctx_indices, value_states)
+            self.keys = ctx_scatter_paged_attention(self.keys, block_id, ctx_indices, key_states)
+            self.values = ctx_scatter_paged_attention(self.values, block_id, ctx_indices, value_states)
 
     def write_only(self, key_states, value_states, cache_kwargs):
         """
@@ -652,8 +650,8 @@ class QEffDynamicLayer(CacheLayerMixin):
             keys_folded = self.keys.reshape(1, cache_bh, ctx_len, head_dim)
             values_folded = self.values.reshape(1, cache_bh, ctx_len, head_dim)
 
-            keys_folded = CtxChunkScatterBatchFunc.apply(keys_folded, position_ids, key_states)
-            values_folded = CtxChunkScatterBatchFunc.apply(values_folded, position_ids, value_states)
+            keys_folded = ctx_chunk_scatter_batch(keys_folded, position_ids, key_states)
+            values_folded = ctx_chunk_scatter_batch(values_folded, position_ids, value_states)
 
             self.keys = keys_folded.reshape(full_batch_size, Hkv, ctx_len, head_dim)
             self.values = values_folded.reshape(full_batch_size, Hkv, ctx_len, head_dim)
@@ -1388,9 +1386,9 @@ class QEffMiniMaxSparseCache(QEffDynamicCache):
 
             block_id = block_id.to(dtype=torch.int32, device=layer.keys.device)
             addr = addr.to(dtype=torch.int32, device=layer.keys.device)
-            layer.keys = CtxPagedScatterFunc.apply(layer.keys, block_id, addr, key_states)
+            layer.keys = ctx_paged_scatter_dp(layer.keys, block_id, addr, key_states)
             layer.keys = layer.keys.reshape(cache_shape)
-            layer.values = CtxPagedScatterFunc.apply(layer.values, block_id, addr, value_states)
+            layer.values = ctx_paged_scatter_dp(layer.values, block_id, addr, value_states)
             layer.values = layer.values.reshape(cache_shape)
             layer._mark_initialized(layer.keys)
 
@@ -1533,7 +1531,7 @@ class QEffMiniMaxSparseCache(QEffDynamicCache):
         invalid_idx = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
         ctx_indices = torch.where(invalid_mask, invalid_idx, ctx_indices).to(torch.int32)
         ctx_indices = ctx_indices.expand(batch_local, rows, block_len)
-        return CtxGatherFuncBlockedKVDP.apply(cache_gp, ctx_indices)
+        return ctx_gather_blocked_kv_dp(cache_gp, ctx_indices)
 
     @classmethod
     def from_legacy_cache(

@@ -40,7 +40,6 @@ import pytest
 import torch
 import yaml
 from torch import nn
-from transformers.cache_utils import DynamicCache
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -53,7 +52,13 @@ from transformers import (
     LlamaConfig,
     Qwen2Config,
 )
+from transformers.cache_utils import DynamicCache
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
+from transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
+    MiniMaxM3VLAttention,
+    MiniMaxM3VLIndexer,
+    MiniMaxM3VLSparseMoeBlock,
+)
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
@@ -69,13 +74,8 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeVisionConfig,
 )
 
-from transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
-    MiniMaxM3VLAttention,
-    MiniMaxM3VLIndexer,
-    MiniMaxM3VLSparseMoeBlock,
-)
-
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.transformers.cache_utils import QEffMiniMaxSparseCache
 from QEfficient.transformers.models.minimax_m3_vl import (
     MiniMaxM3SparseForConditionalGeneration,
     MiniMaxM3VLConfig,
@@ -90,7 +90,6 @@ from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import 
     QEffMiniMaxM3VLSparseMoeBlock,
     _generate_minimax_npi_file,
 )
-from QEfficient.transformers.cache_utils import QEffMiniMaxSparseCache
 from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
     QEFFAutoModelForCausalLM,
@@ -1859,6 +1858,7 @@ def test_minimax_m3_expert_parallel_prefill_hf_pytorch_vs_aic(tmp_path):
 
     session = QAICInferenceSession(qpc_path)
     try:
+
         def binding_value(input_name, source=None):
             binding = session.bindings[session.binding_index_map[input_name]]
             shape = tuple(binding.dims)
@@ -1879,9 +1879,7 @@ def test_minimax_m3_expert_parallel_prefill_hf_pytorch_vs_aic(tmp_path):
                 aic_inputs[input_name] = binding_value(input_name, position_ids.numpy())
             elif input_name == "image_idx":
                 aic_inputs[input_name] = binding_value(input_name, np.zeros((1, 1), dtype=np.int64))
-            elif input_name == "vision_embeds" or input_name.startswith(
-                ("past_key.", "past_value.", "index_key.")
-            ):
+            elif input_name == "vision_embeds" or input_name.startswith(("past_key.", "past_value.", "index_key.")):
                 aic_inputs[input_name] = binding_value(input_name)
             else:
                 raise AssertionError(f"Unhandled MiniMax AIC input: {input_name}")
@@ -6172,6 +6170,7 @@ def test_kimi_k25_get_specializations_supports_multi_resolution_grid_sizes():
             num_patches=2508,
             kv_offload=True,
         )
+
 
 @pytest.mark.cpu_only
 def test_runner_io_bundle_is_cpu_only_and_qaic_runner_compatible(tmp_path):
