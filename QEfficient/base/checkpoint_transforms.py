@@ -508,6 +508,18 @@ def _clear_stale_prepared_dir(out: Path, src: Path) -> None:
     else:
         out.unlink()
 
+def _config_num_experts(config) -> Optional[int]:
+    """Return the MoE expert count from top-level or nested text configs."""
+    if config is None:
+        return None
+    for candidate in (config, getattr(config, "text_config", None), getattr(config, "llm_config", None)):
+        if candidate is None:
+            continue
+        num_experts = getattr(candidate, "num_local_experts", None) or getattr(candidate, "num_experts", None)
+        if num_experts:
+            return int(num_experts)
+    return None
+
 
 def detect_group_transform(
     config,
@@ -542,9 +554,10 @@ def detect_group_transform(
     if hash_params is None:
         hash_params = {}
 
-    num_experts = None
-    if config is not None:
-        num_experts = getattr(config, "num_local_experts", None) or getattr(config, "num_experts", None)
+    # num_experts = None
+    # if config is not None:
+    #     num_experts = getattr(config, "num_local_experts", None) or getattr(config, "num_experts", None)
+    num_experts = _config_num_experts(config)
     if not num_experts:
         return None
 

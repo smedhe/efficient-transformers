@@ -17,6 +17,7 @@ from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor,
 from QEfficient import QEFFAutoModelForImageTextToText
 
 MODEL_ID = "MiniMaxAI/MiniMax-M3"
+# MODEL_ID = "/home/smedhe/MINIMAX/tiny-random-minimax-m3/model.safetensors"
 
 
 def _expand_batch(inputs, batch_size: int):
@@ -100,7 +101,7 @@ def _run_pytorch_parity_test(
             qaic_config["msa_attn_cp"] = msa_attn_cp
             qaic_config["msa_attn_dp"] = msa_attn_dp
 
-    qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(model_dir, torch_dtype=torch.float32)
+    qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(model_dir, weight_free=True, torch_dtype=torch.float32)
     qeff_model.compile(
         batch_size=execution_batch_size,
         prefill_seq_len=1,
@@ -112,7 +113,7 @@ def _run_pytorch_parity_test(
         skip_vision=True,
         node_precision_info=True,
         offload_pt_weights=False,
-        weight_free=False,
+        dynamo=True,
         qaic_config=qaic_config,
     )
 
@@ -245,7 +246,7 @@ def main():
     factory_kwargs["config"] = config
 
     t0 = time.perf_counter()
-    qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(args.model_id, **factory_kwargs)
+    qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(args.model_id, weight_free=True, **factory_kwargs)
     print(f"[timing] model load:          {time.perf_counter() - t0:.2f}s")
 
     t0 = time.perf_counter()
@@ -259,6 +260,7 @@ def main():
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
+        dynamo=True,
         skip_vision=True,
         node_precision_info=True,
         offload_pt_weights=False,

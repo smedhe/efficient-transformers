@@ -148,7 +148,10 @@ def _decoder_function_npi_names(model: onnx.ModelProto) -> list[str]:
     npi_names = []
     for function_call in model.graph.node:
         function = functions.get((function_call.domain, function_call.op_type))
-        if function is None or "/language_model/layers." not in function_call.name:
+        is_decoder_call = "/language_model/layers." in function_call.name or function_call.op_type.startswith(
+            "QEffMiniMaxM3VLDecoderLayer"
+        )
+        if function is None or not is_decoder_call:
             continue
         npi_names.extend(
             f"{function_node.name}_output_0"
@@ -288,7 +291,7 @@ def update_running_softmax(
     else:
         value_update = torch.matmul(current_exp, value_block)
     updated_output = output * torch.exp(delta_max.unsqueeze(-1)) + value_update
-    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+    if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
         if skip_future is None:
             raise ValueError("skip_future is required when skip_kv is enabled.")
         updated_max = torch.where(skip_future, previous_max, updated_max)
@@ -781,7 +784,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             q_blocks = nested_q_blocks[q_chunk_idx]
             query_position_blocks = nested_position_blocks[q_chunk_idx]
             q_chunk_position = query_positions.max(dim=-1).values
-            is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()
+            is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
 
             for block_idx in range(num_kv_blocks):
                 start = block_idx * kv_block_size
@@ -918,7 +921,8 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                     scores,
                 )
                 for local_offset in range(cfg.index_local_blocks):
-                    local_block = q_positions // index_block_size - local_offset
+                    # local_block = q_positions // index_block_size - local_offset
+                    local_block = torch.div(q_positions, index_block_size, rounding_mode='floor') - local_offset
                     local_block = torch.where(
                         local_block >= 0,
                         local_block,
@@ -946,7 +950,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         block_indices = torch.cat(topk_indices_chunks, dim=2)
         block_valid = torch.cat(topk_valid_chunks, dim=2)
         safe_indices = torch.where(block_valid, block_indices, torch.zeros_like(block_indices)).to(torch.int32)
-        if not torch.onnx.is_in_onnx_export():
+        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             self.last_block_indices = safe_indices.detach()
         return safe_indices, block_valid, index_key_cache
 
@@ -1215,8 +1219,10 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             .expand(batch_local, dp, cp, hkv, query_len)
             .reshape(batch_local, rows, query_len)
         )
-        logical_page = position_ids_dp // page_block_size
-        logical_page_group = logical_page // cp
+        # logical_page = position_ids_dp // page_block_size
+        logical_page = torch.div(position_ids_dp, page_block_size, rounding_mode='floor')
+        # logical_page_group = logical_page // cp
+        logical_page_group = torch.div(logical_page, cp, rounding_mode='floor')
         block_id_dp = (
             torch.gather(block_table.permute(1, 0, 2), 2, logical_page_group)
             .to(torch.int32)
@@ -1337,12 +1343,14 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                 .unsqueeze(3)
                 .expand(1, rows, num_cores, ql_eff, num_kv_blocks * page_groups_per_core)
             )
-            current_block_rows = (
-                (position_ids_dp[batch_idx : batch_idx + 1, :, 0] // cfg.index_block_size)
-                .view(1, dp, 1, 1)
-                .expand(1, dp, cp, hkv)
-                .reshape(1, rows)
-            )
+            # current_block_rows = (
+            #     (position_ids_dp[batch_idx : batch_idx + 1, :, 0] // cfg.index_block_size)
+            #     .view(1, dp, 1, 1)
+            #     .expand(1, dp, cp, hkv)
+            #     .reshape(1, rows)
+            # )
+            current_block_rows = torch.div(position_ids_dp[batch_idx : batch_idx + 1, :, 0], cfg.index_block_size, rounding_mode='floor')
+            current_block_rows = current_block_rows.view(1, dp, 1, 1).expand(1, dp, cp, hkv).reshape(1, rows)
             future_block = device_block_ids >= current_block_rows.view(1, rows, 1, 1, 1)
             device_block_scores = torch.where(
                 future_block,
@@ -1414,19 +1422,21 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         block_indices = block_indices.permute(1, 0, 2, 3, 4, 5).reshape(
             batch, num_index_heads, query_len, cfg.index_topk_blocks
         )
-        current_block_ids = (
-            (position_ids // cfg.index_block_size)
-            .view(batch, 1, query_len, 1)
-            .expand(batch, num_index_heads, query_len, 1)
-            .to(block_indices.dtype)
-        )
+        # current_block_ids = (
+        #     (position_ids // cfg.index_block_size)
+        #     .view(batch, 1, query_len, 1)
+        #     .expand(batch, num_index_heads, query_len, 1)
+        #     .to(block_indices.dtype)
+        # )
+        current_block_ids = torch.div(position_ids, cfg.index_block_size, rounding_mode='floor')
+        current_block_ids = current_block_ids.view(batch, 1, query_len, 1).expand(batch, num_index_heads, query_len, 1).to(block_indices.dtype)
         block_indices = torch.cat((block_indices[..., :-1], current_block_ids), dim=-1)
         topk_scores = torch.cat((topk_scores[..., :-1], torch.zeros_like(topk_scores[..., -1:])), dim=-1)
         block_valid = topk_scores > (MASKED_ATTENTION_LOGIT / 2)
         block_indices = block_indices[:, :, 0]
         block_valid = block_valid[:, :, 0]
         safe_block_indices = torch.where(block_valid, block_indices, torch.zeros_like(block_indices)).to(torch.int32)
-        if not torch.onnx.is_in_onnx_export():
+        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             self.last_block_indices = block_indices.detach()
         # safe_block_indices: [B, index_n_heads, selected_blocks]
         # block_valid:        [B, index_n_heads, selected_blocks]
@@ -1619,7 +1629,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         candidate_score_groups: list[torch.Tensor] = []
         candidate_block_groups: list[torch.Tensor] = []
         local_batch_size = 1
-        is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()
+        is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
 
         def make_block_ids_rows(start: int, local: int) -> torch.Tensor:
             block_start = start * cp // cfg.index_block_size
@@ -1819,7 +1829,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         if not index_cache_is_dp_layout and not index_cache_is_flat_dp_layout:
             index_key_cache = self._from_dp_cache_shape(index_key_cache, dp, cp)
         past_key_values.index_keys[layer_idx] = index_key_cache
-        if not torch.onnx.is_in_onnx_export():
+        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             self.last_block_indices = block_indices.detach()
         # safe_indices/block_valid: [B, index_n_heads, selected_blocks]
         return safe_indices, block_valid
@@ -1964,7 +1974,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             q_blocks = nested_q_blocks[q_chunk_idx]
             query_position_blocks = nested_position_blocks[q_chunk_idx]
             q_chunk_position = query_positions.max(dim=-1).values
-            is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()
+            is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
 
             for block_idx in range(num_kv_blocks):
                 start = block_idx * kv_block_size
@@ -2066,7 +2076,8 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                         scores,
                     )
                 for local_offset in range(cfg.index_local_blocks):
-                    local_block = q_positions // index_block_size - local_offset
+                    # local_block = q_positions // index_block_size - local_offset
+                    local_block = torch.div(q_positions, index_block_size, rounding_mode='floor') - local_offset
                     local_block = torch.where(
                         local_block >= 0,
                         local_block,
@@ -2090,7 +2101,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         block_indices = torch.cat(topk_indices_chunks, dim=2)
         block_valid = torch.cat(topk_valid_chunks, dim=2)
         safe_indices = torch.where(block_valid, block_indices, torch.zeros_like(block_indices)).to(torch.int32)
-        if not torch.onnx.is_in_onnx_export():
+        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             self.last_block_indices = safe_indices.detach()
         past_key_values.index_keys[layer_idx] = index_key_cache
         return safe_indices, block_valid
@@ -3006,7 +3017,8 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         if block_table.shape[-1] < num_page_groups:
             raise ValueError("msa_attn_block_table is too short for paged attention.")
         if has_global_indices:
-            logical_pages_global = gather_idx_global // page_block_size
+            # logical_pages_global = gather_idx_global // page_block_size
+            logical_pages_global = torch.div(gather_idx_global, page_block_size, rounding_mode='floor')
             owner_cp = logical_pages_global % cp
             cp_idx = torch.arange(cp, device=query_states.device).view(1, 1, cp, 1, 1)
             valid_idx = valid_idx_global.unsqueeze(2) & (owner_cp.unsqueeze(2) == cp_idx)
@@ -3041,10 +3053,12 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             gather_blocks = gather_idx[batch_start:batch_end].view(local, rows, selected_blocks, cfg.index_block_size)
             valid_blocks = valid_idx[batch_start:batch_end].view(local, rows, selected_blocks, cfg.index_block_size)
             q_local = q_rows[batch_start:batch_end]
-            logical_pages = (gather_blocks[0, ..., 0] // page_block_size).long()
+            # logical_pages = (gather_blocks[0, ..., 0] // page_block_size).long()
+            logical_pages = torch.div(gather_blocks[0, ..., 0], page_block_size, rounding_mode='floor').long()
             row_dp = torch.arange(rows, device=query_states.device) // (cp * hkv)
             table_rows = block_table[:, batch_start].index_select(0, row_dp)
-            physical_block_ids = torch.gather(table_rows, 1, logical_pages // cp)
+            # physical_block_ids = torch.gather(table_rows, 1, logical_pages // cp)
+            physical_block_ids = torch.gather(table_rows, 1, torch.div(logical_pages, cp, rounding_mode='floor'))
             physical_block_ids = torch.where(
                 valid_blocks[0].any(dim=-1),
                 physical_block_ids,
@@ -3225,8 +3239,10 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 batch_local = input_shape[0] // attn_dp
                 position_ids_dp = position_ids.view(attn_dp, batch_local, -1).permute(1, 0, 2)
                 table = attention_block_table.permute(1, 0, 2)
-                logical_page = position_ids_dp // key_cache.shape[2]
-                logical_page_group = logical_page // attn_cp
+                # logical_page = position_ids_dp // key_cache.shape[2]
+                logical_page = torch.div(position_ids_dp, key_cache.shape[2], rounding_mode='floor')
+                # logical_page_group = logical_page // attn_cp
+                logical_page_group = torch.div(logical_page, attn_cp, rounding_mode='floor')
                 owner_cp = logical_page % attn_cp
                 cp_idx = torch.arange(attn_cp, device=key_cache.device).view(1, 1, attn_cp, 1, 1)
                 row_live = owner_cp.unsqueeze(2).unsqueeze(3) == cp_idx
@@ -3372,10 +3388,10 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
 
 def _qeff_minimax_clamp(hidden_states: torch.Tensor, min_value=None, max_value=None) -> torch.Tensor:
     if min_value is not None:
-        min_tensor = torch.tensor(min_value, dtype=hidden_states.dtype, device=hidden_states.device)
+        min_tensor = torch.full_like(hidden_states, min_value, dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = torch.maximum(hidden_states, min_tensor)
     if max_value is not None:
-        max_tensor = torch.tensor(max_value, dtype=hidden_states.dtype, device=hidden_states.device)
+        max_tensor = torch.full_like(hidden_states, max_value, dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = torch.minimum(hidden_states, max_tensor)
     return hidden_states
 
@@ -3395,7 +3411,7 @@ class QEffMiniMaxM3VLTopKRouter(MiniMaxM3VLTopKRouter):
         hidden_states = hidden_states.reshape(-1, self.hidden_dim)
         router_logits = nn.functional.linear(hidden_states.to(self.weight.dtype), self.weight)
         routing_weights = nn.functional.sigmoid(router_logits.float())
-        scores_for_choice = routing_weights + self.e_score_correction_bias
+        scores_for_choice = routing_weights + self.e_score_correction_bias.to(device=routing_weights.device)
         _, top_k_index = torch.topk(scores_for_choice, self.top_k, dim=1, sorted=False)
         top_k_weights = routing_weights.gather(1, top_k_index)
         denom = torch.einsum("tk->t", top_k_weights)
@@ -3481,9 +3497,13 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
         # Hoist pre-scaled RoPE tables onto the text model as parameters.  This
         # exports them as graph initializers, matching the established QEff
         # Llama/Qwen path, instead of Constant nodes inside rotary_emb.
+        rotary_device = self.embed_tokens.weight.device
+        if rotary_device.type == "meta":
+            rotary_device = torch.device("cpu")
+        #TODO: this is not teh correct solution  for handling meta device, need to figure out the original tensor which needs to be moved
         rotary_emb = QEffMiniMaxM3VLRotaryEmbedding(
             config=self.config,
-            device=self.embed_tokens.weight.device,
+            device=rotary_device,
         )
         self.cos_cached = nn.Parameter(rotary_emb.cos_cached.contiguous(), requires_grad=False)
         self.sin_cached = nn.Parameter(rotary_emb.sin_cached.contiguous(), requires_grad=False)
@@ -3552,14 +3572,14 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
         if indexer_dim is not None:
             cos, sin = position_embeddings
             rotary_dim = min(cos.shape[-1], indexer_dim)
-            indexer_cos = cos[..., :rotary_dim]
-            indexer_sin = sin[..., :rotary_dim]
+            indexer_cos = cos[..., :rotary_dim].clone()
+            indexer_sin = sin[..., :rotary_dim].clone()
             if inputs_embeds.shape[1] == 1 and indexer_dp > 1:
                 batch_local = inputs_embeds.shape[0] // indexer_dp
-                indexer_cos = indexer_cos.view(
+                indexer_cos = indexer_cos.reshape(
                     indexer_dp, batch_local, indexer_cos.shape[1], indexer_cos.shape[-1]
                 ).permute(1, 0, 2, 3)
-                indexer_sin = indexer_sin.view(
+                indexer_sin = indexer_sin.reshape(
                     indexer_dp, batch_local, indexer_sin.shape[1], indexer_sin.shape[-1]
                 ).permute(1, 0, 2, 3)
             indexer_position_embeddings = (indexer_cos, indexer_sin)
@@ -3650,8 +3670,9 @@ class QEffMiniMaxM3VLEncoderWrapper(nn.Module):
             image_embeds = torch.cat(image_embeds, dim=0)
         image_embeds = image_embeds.to(pixel_values.device, pixel_values.dtype)
         bs = image_grid_thw.shape[0]
-        split_size = torch.floor_divide(torch.tensor(image_embeds.size(0), device=image_embeds.device), bs)
-        image_embeds = image_embeds.reshape(bs, split_size, image_embeds.size(-1))
+        split_size = image_embeds.shape[0] // bs
+        image_embeds = image_embeds.reshape(bs, split_size, image_embeds.size(1))
+        # image_embeds = image_embeds.reshape(bs, split_size, image_embeds.size(-1))
         return image_embeds
 
 
@@ -3711,8 +3732,9 @@ class QEffMiniMaxM3VLDecoderWrapper(nn.Module):
             indices1 = torch.where(indices1 != -1, indices1 + image_idx, indices1)
             image_features_expanded = vision_embeds.reshape(-1, hidden_dim)[indices1]
             image_input_embeds = torch.where(selected.unsqueeze(-1), image_features_expanded, inputs_embeds)
+            scalar_device = "cpu" if torch._dynamo.is_compiling() else input_ids.device
             inputs_embeds = torch.where(
-                input_ids.shape[1] == torch.tensor(1, device=input_ids.device), inputs_embeds, image_input_embeds
+                input_ids.shape[1] == torch.tensor(1, device=scalar_device), inputs_embeds, image_input_embeds
             )
             image_idx_output = (indices1.max() + 1).unsqueeze(0).unsqueeze(0)
         else:
@@ -3751,7 +3773,7 @@ class QEffMiniMaxM3VLDecoderWrapper(nn.Module):
             past_kv_out = tuple((t[0], t[1]) for t in result_cache)
             index_keys_out = tuple(t[2] for t in result_cache if len(t) == 3)
 
-        return logits, vision_embeds, image_idx_output, past_kv_out, index_keys_out
+        return logits, vision_embeds.clone(), image_idx_output, past_kv_out, index_keys_out
 
 
 class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalGeneration):
@@ -3827,8 +3849,9 @@ class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalG
         indices0 = torch.arange(selected.shape[0], device=selected.device).view(-1, 1)
         image_features_expanded = image_features.reshape(-1, hidden_dim).unsqueeze(0)[indices0, indices1]
         image_input_embeds = torch.where(selected.unsqueeze(-1), image_features_expanded, inputs_embeds)
+        scalar_device = "cpu" if torch._dynamo.is_compiling() else input_ids.device
         inputs_embeds = torch.where(
-            input_ids.shape[1] == torch.tensor(1, device=input_ids.device), inputs_embeds, image_input_embeds
+            input_ids.shape[1] == torch.tensor(1, device=scalar_device), inputs_embeds, image_input_embeds
         )
 
         if past_key_values is not None and not isinstance(past_key_values, Cache):
@@ -4178,9 +4201,10 @@ class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalG
                         )
                     _set_retained_state_axes(
                         f"index_key.{i}",
-                        {0: "indexer_physical_pages", 2: "page_size"},
+                        # {0: "indexer_physical_pages", 2: "page_size"},
+                        {2: "page_size"},
                     )
-            lang_dynamic_axes["msa_indexer_block_table"] = {1: "indexer_batch_local", 2: "indexer_page_groups"}
+            lang_dynamic_axes["msa_indexer_block_table"] = {1: "indexer_batch_local"}
             lang_dynamic_axes["msa_attn_block_table"] = {1: "attn_batch_local", 2: "attn_page_groups"}
         if continuous_batching:
             lang_dynamic_axes["batch_index"] = {0: "batch_size"}
@@ -4260,7 +4284,7 @@ class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalG
                 # the standard [batch, Hkv, ctx_len, head_dim] layout.  Only
                 # sparse M3 layers use the CP-partitioned GP cache above.
                 shape = standard_kv_cache_shape
-            past_key_values.append((torch.zeros(shape, dtype=dtype), torch.zeros(shape, dtype=dtype)))
+            past_key_values.append([torch.zeros(shape, dtype=dtype), torch.zeros(shape, dtype=dtype)])
         return past_key_values
 
     def get_dummy_index_keys(

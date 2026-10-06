@@ -39,6 +39,7 @@ import onnxruntime as ort
 import pytest
 import torch
 import yaml
+from accelerate import init_empty_weights
 from torch import nn
 from transformers import (
     AutoConfig,
@@ -58,6 +59,7 @@ from transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
     MiniMaxM3VLAttention,
     MiniMaxM3VLIndexer,
     MiniMaxM3VLSparseMoeBlock,
+    MiniMaxM3VLTextModel,
 )
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
@@ -88,6 +90,7 @@ from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import 
     QEffMiniMaxM3VLIndexer,
     QEffMiniMaxM3VLRotaryEmbedding,
     QEffMiniMaxM3VLSparseMoeBlock,
+    QEffMiniMaxM3VLTextModel,
     _generate_minimax_npi_file,
 )
 from QEfficient.transformers.models.modeling_auto import (
@@ -1270,6 +1273,60 @@ def test_minimax_m3_npi_generation_expands_decoder_functions(tmp_path):
         "/language_model/layers.0/CustomRMSNorm_3_output_0",
         "/language_model/layers.0/Add_1_output_0",
     ]
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_npi_generation_accepts_renamed_decoder_functions(tmp_path):
+    decoder_function = onnx.helper.make_function(
+        "pkg.torch.__subgraph__",
+        "QEffMiniMaxM3VLDecoderLayer",
+        ["hidden_states"],
+        ["hidden_states.1"],
+        [onnx.helper.make_node("Add", ["hidden_states", "attn"], ["hidden_states.1"], name="node_add")],
+        opset_imports=[onnx.helper.make_opsetid("", 17)],
+    )
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node(
+                "QEffMiniMaxM3VLDecoderLayer",
+                ["x"],
+                ["decoder_output"],
+                name="node_invoke_subgraph",
+                domain="pkg.torch.__subgraph__",
+            )
+        ],
+        "minimax",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])],
+        [onnx.helper.make_tensor_value_info("decoder_output", onnx.TensorProto.FLOAT, [1])],
+    )
+    onnx_path = tmp_path / "minimax.onnx"
+    onnx.save(
+        onnx.helper.make_model(
+            graph,
+            opset_imports=[onnx.helper.make_opsetid("", 17)],
+            functions=[decoder_function],
+        ),
+        onnx_path,
+    )
+
+    npi_path = Path(_generate_minimax_npi_file(onnx_path))
+    npi = yaml.safe_load(npi_path.read_text())
+    assert npi["FP32NodeInstanceNames"] == ["node_add_output_0"]
+
+
+def test_minimax_m3_meta_text_model_materializes_rope_cache():
+    config = _tiny_minimax_m3_text_config(dtype=torch.float16)
+    with init_empty_weights():
+        model = MiniMaxM3VLTextModel(config)
+
+    model.__class__ = QEffMiniMaxM3VLTextModel
+    model.__qeff_init__()
+
+    assert model.embed_tokens.weight.is_meta
+    assert not model.cos_cached.is_meta
+    assert not model.sin_cached.is_meta
+    assert model.cos_cached.device.type == "cpu"
+    assert model.sin_cached.device.type == "cpu"
 
 
 @pytest.mark.llm_model
