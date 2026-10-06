@@ -71,10 +71,8 @@ def _(
     compile_axis_size: int,
 ) -> torch.Tensor:
     normalized_dim = dim if dim >= 0 else tensor.dim() + dim
-    start = compile_axis_size * chunk_idx // num_chunks
-    end = compile_axis_size * (chunk_idx + 1) // num_chunks
     output_shape = list(tensor.shape)
-    output_shape[normalized_dim] = end - start
+    output_shape[normalized_dim] = compile_axis_size // num_chunks
     return torch.empty(output_shape, dtype=tensor.dtype, device=tensor.device)
 
 

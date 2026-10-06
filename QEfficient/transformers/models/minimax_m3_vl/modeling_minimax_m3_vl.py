@@ -52,6 +52,7 @@ from QEfficient.transformers.cache_utils import (
     QEffMiniMaxSparseCache,
 )
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
+from QEfficient.transformers.models.minimax_m3_vl.onnx_transforms import MiniMaxM3StaticPrefillLoopTransform
 from QEfficient.transformers.moe import (
     MoEFlavour,
     MoEProfile,
@@ -87,14 +88,25 @@ def _dynamic_sequence_chunks(
     compile_axis_size: Optional[int] = None,
 ) -> tuple[torch.Tensor, ...]:
     """Split an evenly divisible dynamic axis without exporting SplitToSequence."""
+    return tuple(
+        _dynamic_sequence_chunk(tensor, num_chunks, chunk_idx, dim, compile_axis_size)
+        for chunk_idx in range(num_chunks)
+    )
+
+
+def _dynamic_sequence_chunk(
+    tensor: torch.Tensor,
+    num_chunks: int,
+    chunk_idx: int,
+    dim: int,
+    compile_axis_size: int | None = None,
+) -> torch.Tensor:
+    """Select one evenly sized chunk while allowing a loop-carried chunk index."""
     if compile_axis_size is not None:
-        return tuple(
-            compile_length_sequence_chunk(tensor, dim, num_chunks, chunk_idx, compile_axis_size)
-            for chunk_idx in range(num_chunks)
-        )
+        return compile_length_sequence_chunk(tensor, dim, num_chunks, chunk_idx, compile_axis_size)
     shape = tensor.shape
     chunked = tensor.reshape(*shape[:dim], num_chunks, -1, *shape[dim + 1 :])
-    return tuple(chunked.select(dim, chunk_idx) for chunk_idx in range(num_chunks))
+    return chunked.select(dim, chunk_idx)
 
 
 def _dynamic_sequence_nested_chunks(
@@ -2125,6 +2137,8 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             raise ValueError("Sparse MSA prefill Q length must be divisible by the cores assigned to each KV head.")
         if query_len % ql_chunk:
             raise ValueError("Sparse MSA prefill Q length must divide evenly by msa_q_chunk.")
+        if ql_chunk % cores_per_kv_head:
+            raise ValueError("Sparse MSA prefill Q chunks must be divisible by the cores assigned to each KV head.")
         if kv_num_blocks > selected_blocks:
             raise ValueError("Sparse MSA prefill KV block count must not exceed the selected block count.")
 
@@ -2178,25 +2192,18 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         q = q.reshape(batch, num_kv_heads, n_rep, query_len, cfg.head_dim)
         offsets = torch.arange(block_size, device=hidden_states.device).view(1, 1, 1, 1, 1, block_size)
 
-        output_chunks: list[torch.Tensor] = []
         num_q_chunks = int(query_len // ql_chunk)
         compile_seq_len = getattr(blocking_config, "prefill_compile_seq_len", None)
-        q_chunks = _dynamic_sequence_chunks(q, num_q_chunks, dim=3, compile_axis_size=compile_seq_len)
-        token_index_chunks = _dynamic_sequence_chunks(
-            token_indices, num_q_chunks, dim=2, compile_axis_size=compile_seq_len
-        )
-        token_valid_chunks = _dynamic_sequence_chunks(
-            token_valid, num_q_chunks, dim=2, compile_axis_size=compile_seq_len
-        )
-        position_chunks = _dynamic_sequence_chunks(position_ids, num_q_chunks, dim=1, compile_axis_size=compile_seq_len)
-        for q_chunk, block_chunk, block_valid_chunk, position_chunk in zip(
-            q_chunks, token_index_chunks, token_valid_chunks, position_chunks
-        ):
+        if torch._dynamo.is_compiling():
+            export_seq_len = getattr(blocking_config, "prefill_export_seq_len", None)
+            if export_seq_len is not None:
+                num_q_chunks = int(export_seq_len // ql_chunk)
+        output_seq_len = compile_seq_len if compile_seq_len is not None else query_len
+
+        def _compute_q_chunk(q_chunk, block_chunk, block_valid_chunk, position_chunk):
+            chunk_batch = q_chunk.shape[0]
             query_chunk = q_chunk.shape[3]
-            if query_chunk % cores_per_kv_head:
-                raise ValueError(
-                    "Every sparse MSA prefill Q chunk must be divisible by the cores assigned to each KV head."
-                )
+            chunk_selected_blocks = block_chunk.shape[-1]
             q_per_core = query_chunk // cores_per_kv_head
 
             # Q, not K, is split across the cores assigned to each KV head.
@@ -2206,7 +2213,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             #   block_core: [B, Hkv, C_per_Hkv, Q/C_per_Hkv, selected_blocks]
             q_core = (
                 q_chunk.reshape(
-                    batch,
+                    chunk_batch,
                     num_kv_heads,
                     n_rep,
                     cores_per_kv_head,
@@ -2215,7 +2222,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 )
                 .permute(0, 1, 3, 4, 2, 5)
                 .reshape(
-                    batch,
+                    chunk_batch,
                     num_kv_heads * cores_per_kv_head,
                     q_per_core,
                     n_rep,
@@ -2224,30 +2231,30 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 .float()
             )
             block_core = block_chunk.reshape(
-                batch,
+                chunk_batch,
                 num_kv_heads,
                 cores_per_kv_head,
                 q_per_core,
-                selected_blocks,
+                chunk_selected_blocks,
             )
             block_valid_core = block_valid_chunk.reshape(
-                batch,
+                chunk_batch,
                 num_kv_heads,
                 cores_per_kv_head,
                 q_per_core,
-                selected_blocks,
+                chunk_selected_blocks,
             )
-            query_positions = position_chunk.reshape(batch, 1, cores_per_kv_head, q_per_core, 1)
+            query_positions = position_chunk.reshape(chunk_batch, 1, cores_per_kv_head, q_per_core, 1)
             q_head_width = q_per_core * n_rep
             q_score_work = q_core.reshape(
-                batch * num_kv_heads * cores_per_kv_head * q_per_core,
+                -1,
                 n_rep,
                 cfg.head_dim,
             )
 
             m_acc = torch.full(
                 (
-                    batch,
+                    chunk_batch,
                     num_kv_heads * cores_per_kv_head,
                     q_head_width,
                 ),
@@ -2257,7 +2264,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             )
             s_acc = torch.zeros_like(m_acc)
             o_acc = torch.zeros(
-                batch,
+                chunk_batch,
                 num_kv_heads * cores_per_kv_head,
                 q_head_width,
                 cfg.head_dim,
@@ -2268,13 +2275,13 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             for kv_block_idx in range(kv_num_blocks):
                 # Split only at MSA block boundaries.  Expanding block IDs to
                 # token addresses here keeps the gather working set bounded.
-                selected_start = (selected_blocks * kv_block_idx) // kv_num_blocks
-                selected_end = (selected_blocks * (kv_block_idx + 1)) // kv_num_blocks
+                selected_start = (chunk_selected_blocks * kv_block_idx) // kv_num_blocks
+                selected_end = (chunk_selected_blocks * (kv_block_idx + 1)) // kv_num_blocks
                 selected_block_count = selected_end - selected_start
                 token_count = selected_block_count * block_size
                 selected_block_ids = block_core[..., selected_start:selected_end]
                 selected_positions = (selected_block_ids.unsqueeze(-1) * block_size + offsets).reshape(
-                    batch,
+                    chunk_batch,
                     num_kv_heads,
                     cores_per_kv_head,
                     q_per_core,
@@ -2291,7 +2298,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 local_query = (
                     (query_positions.unsqueeze(-2) - selected_block_ids.unsqueeze(-1) * block_size)
                     .expand(
-                        batch,
+                        chunk_batch,
                         num_kv_heads,
                         cores_per_kv_head,
                         q_per_core,
@@ -2299,7 +2306,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                         block_size,
                     )
                     .reshape(
-                        batch,
+                        chunk_batch,
                         num_kv_heads,
                         cores_per_kv_head,
                         q_per_core,
@@ -2310,7 +2317,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     block_valid_core[..., selected_start:selected_end]
                     .unsqueeze(-1)
                     .expand(
-                        batch,
+                        chunk_batch,
                         num_kv_heads,
                         cores_per_kv_head,
                         q_per_core,
@@ -2318,7 +2325,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                         block_size,
                     )
                     .reshape(
-                        batch,
+                        chunk_batch,
                         num_kv_heads,
                         cores_per_kv_head,
                         q_per_core,
@@ -2350,7 +2357,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     _scalar_like(selected_positions, invalid_idx_value),
                 )
                 gather_positions = safe_selected_positions.reshape(
-                    batch,
+                    chunk_batch,
                     num_kv_heads,
                     cores_per_kv_head * q_per_core * token_count,
                 ).to(torch.int32)
@@ -2359,7 +2366,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     key_block = (
                         ctx_gather_blocked_kv(key_cache, gather_positions)
                         .reshape(
-                            batch,
+                            chunk_batch,
                             num_kv_heads,
                             cores_per_kv_head,
                             q_per_core,
@@ -2367,7 +2374,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                             cfg.head_dim,
                         )
                         .reshape(
-                            batch,
+                            chunk_batch,
                             num_kv_heads * cores_per_kv_head,
                             q_per_core,
                             token_count,
@@ -2378,7 +2385,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     value_block = (
                         ctx_gather_blocked_kv(value_cache, gather_positions)
                         .reshape(
-                            batch,
+                            chunk_batch,
                             num_kv_heads,
                             cores_per_kv_head,
                             q_per_core,
@@ -2386,7 +2393,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                             cfg.head_dim,
                         )
                         .reshape(
-                            batch,
+                            chunk_batch,
                             num_kv_heads * cores_per_kv_head,
                             q_per_core,
                             token_count,
@@ -2398,12 +2405,12 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     page_ids = (
                         block_chunk[..., selected_start:selected_end]
                         .to(torch.int64)
-                        .reshape(batch, num_kv_heads, selected_block_count * query_chunk)
+                        .reshape(chunk_batch, num_kv_heads, selected_block_count * query_chunk)
                     )
                     table = (
                         paged_block_table.to(torch.int64)
                         .unsqueeze(1)
-                        .expand(batch, num_kv_heads, paged_block_table.shape[1])
+                        .expand(chunk_batch, num_kv_heads, paged_block_table.shape[1])
                     )
                     physical_ids = torch.gather(table, 2, page_ids)
                     # Keep the KV-head row explicit in the page gather.  The
@@ -2411,14 +2418,14 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     # returned every head implicitly, which hides the row/head
                     # split from the compiler.
                     key_pages = _gather_paged_kv_selected_heads(key_cache, physical_ids).view(
-                        batch,
+                        chunk_batch,
                         num_kv_heads,
                         query_chunk,
                         token_count,
                         cfg.head_dim,
                     )
                     value_pages = _gather_paged_kv_selected_heads(value_cache, physical_ids).view(
-                        batch,
+                        chunk_batch,
                         num_kv_heads,
                         query_chunk,
                         token_count,
@@ -2426,7 +2433,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     )
                     key_block = (
                         key_pages.reshape(
-                            batch,
+                            chunk_batch,
                             num_kv_heads,
                             cores_per_kv_head,
                             q_per_core,
@@ -2434,7 +2441,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                             cfg.head_dim,
                         )
                         .reshape(
-                            batch,
+                            chunk_batch,
                             num_kv_heads * cores_per_kv_head,
                             q_per_core,
                             token_count,
@@ -2444,7 +2451,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     )
                     value_block = (
                         value_pages.reshape(
-                            batch,
+                            chunk_batch,
                             num_kv_heads,
                             cores_per_kv_head,
                             q_per_core,
@@ -2452,7 +2459,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                             cfg.head_dim,
                         )
                         .reshape(
-                            batch,
+                            chunk_batch,
                             num_kv_heads * cores_per_kv_head,
                             q_per_core,
                             token_count,
@@ -2462,7 +2469,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     )
                 value_block = torch.where(
                     valid_block.reshape(
-                        batch,
+                        chunk_batch,
                         num_kv_heads * cores_per_kv_head,
                         q_per_core,
                         token_count,
@@ -2471,12 +2478,12 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     _scalar_like(value_block, 0.0),
                 )
                 key_score_work = key_block.reshape(
-                    batch * num_kv_heads * cores_per_kv_head * q_per_core,
+                    -1,
                     token_count,
                     cfg.head_dim,
                 ).transpose(1, 2)
                 scores_block = torch.bmm(q_score_work, key_score_work).reshape(
-                    batch,
+                    chunk_batch,
                     num_kv_heads * cores_per_kv_head,
                     q_per_core,
                     n_rep,
@@ -2484,7 +2491,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 ) * (cfg.head_dim**-0.5)
                 attn_block = torch.where(
                     ~valid_block.reshape(
-                        batch,
+                        chunk_batch,
                         num_kv_heads * cores_per_kv_head,
                         q_per_core,
                         token_count,
@@ -2492,7 +2499,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     _scalar_like(scores_block, mask_value),
                     scores_block,
                 ).reshape(
-                    batch,
+                    chunk_batch,
                     num_kv_heads * cores_per_kv_head,
                     q_head_width,
                     token_count,
@@ -2508,7 +2515,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             out_chunk = (
                 (o_acc / s_acc.clamp_min(1.0).unsqueeze(-1))
                 .reshape(
-                    batch,
+                    chunk_batch,
                     num_kv_heads,
                     cores_per_kv_head,
                     q_per_core,
@@ -2517,16 +2524,71 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 )
                 .permute(0, 1, 4, 2, 3, 5)
                 .reshape(
-                    batch,
+                    chunk_batch,
                     cfg.num_attention_heads,
                     query_chunk,
                     cfg.head_dim,
                 )
             )
-            output_chunks.append(out_chunk)
+            return out_chunk
+
+        if torch._dynamo.is_compiling():
+            attn_output = torch.zeros(
+                batch,
+                cfg.num_attention_heads,
+                output_seq_len,
+                cfg.head_dim,
+                dtype=torch.float32,
+                device=q.device,
+            )
+
+            def _loop_cond(chunk_idx, output):
+                return chunk_idx < num_q_chunks
+
+            def _loop_body(chunk_idx, output):
+                chunk_idx_value = chunk_idx.item()
+                q_chunk = _dynamic_sequence_chunk(q, num_q_chunks, chunk_idx_value, 3, compile_seq_len)
+                block_chunk = _dynamic_sequence_chunk(token_indices, num_q_chunks, chunk_idx_value, 2, compile_seq_len)
+                block_valid_chunk = _dynamic_sequence_chunk(
+                    token_valid, num_q_chunks, chunk_idx_value, 2, compile_seq_len
+                )
+                position_chunk = _dynamic_sequence_chunk(
+                    position_ids, num_q_chunks, chunk_idx_value, 1, compile_seq_len
+                )
+                out_chunk = _compute_q_chunk(q_chunk, block_chunk, block_valid_chunk, position_chunk)
+                chunk_start = chunk_idx_value * out_chunk.shape[2]
+                updated_output = torch.slice_scatter(
+                    output,
+                    out_chunk,
+                    dim=2,
+                    start=chunk_start,
+                    end=chunk_start + out_chunk.shape[2],
+                )
+                return chunk_idx + 1, updated_output
+
+            loop_index = torch.zeros((), dtype=torch.int64, device=q.device)
+            _, attn_output = torch.while_loop(_loop_cond, _loop_body, (loop_index, attn_output))
+        else:
+            q_chunks = _dynamic_sequence_chunks(q, num_q_chunks, dim=3, compile_axis_size=compile_seq_len)
+            token_index_chunks = _dynamic_sequence_chunks(
+                token_indices, num_q_chunks, dim=2, compile_axis_size=compile_seq_len
+            )
+            token_valid_chunks = _dynamic_sequence_chunks(
+                token_valid, num_q_chunks, dim=2, compile_axis_size=compile_seq_len
+            )
+            position_chunks = _dynamic_sequence_chunks(
+                position_ids, num_q_chunks, dim=1, compile_axis_size=compile_seq_len
+            )
+            output_chunks = (
+                _compute_q_chunk(q_chunk, block_chunk, block_valid_chunk, position_chunk)
+                for q_chunk, block_chunk, block_valid_chunk, position_chunk in zip(
+                    q_chunks, token_index_chunks, token_valid_chunks, position_chunks
+                )
+            )
+            attn_output = torch.cat(tuple(output_chunks), dim=2)
 
         return (
-            torch.cat(output_chunks, dim=2),
+            attn_output,
             key_cache,
             value_cache,
         )
@@ -3660,6 +3722,51 @@ class QEffMiniMaxM3VLDecoderWrapper(nn.Module):
 
     def get_submodules_for_export(self) -> Type[nn.Module]:
         return {QEffMiniMaxM3VLDecoderLayer}
+
+    def get_onnx_transforms(self) -> tuple[type, ...]:
+        return (MiniMaxM3StaticPrefillLoopTransform,)
+
+    def get_onnx_transform_kwargs(self, *, inputs, prefill_only: bool) -> dict:
+        if not prefill_only:
+            return {}
+
+        sequence_input = inputs.get("inputs_embeds")
+        if sequence_input is None:
+            sequence_input = inputs.get("input_ids")
+        if sequence_input is None:
+            raise ValueError("MiniMax MSA prefill export requires input_ids or inputs_embeds to determine loop bounds.")
+        export_seq_len = int(sequence_input.shape[1])
+
+        trip_counts = set()
+        layer_types = getattr(self.language_model.config, "layer_types", None)
+        for module in self.language_model.modules():
+            if not isinstance(module, QEffMiniMaxM3VLAttention):
+                continue
+            layer_idx = getattr(module, "layer_idx", None)
+            if (
+                layer_types is not None
+                and layer_idx is not None
+                and 0 <= layer_idx < len(layer_types)
+                and layer_types[layer_idx] != "minimax_m3_sparse"
+            ):
+                continue
+            blocking_config = getattr(module, "attn_blocking_config", None)
+            msa_q_chunk = getattr(blocking_config, "msa_q_chunk", None)
+            if msa_q_chunk is None:
+                continue
+            msa_q_chunk = int(msa_q_chunk)
+            loop_seq_len = int(getattr(blocking_config, "prefill_export_seq_len", None) or export_seq_len)
+            if msa_q_chunk <= 0 or loop_seq_len % msa_q_chunk:
+                raise ValueError(
+                    "MiniMax MSA prefill export sequence length must be divisible by the MSA query chunk size."
+                )
+            trip_counts.add(loop_seq_len // msa_q_chunk)
+
+        if not trip_counts:
+            return {}
+        if len(trip_counts) != 1:
+            raise ValueError(f"MiniMax sparse attention layers produced inconsistent Loop trip counts: {trip_counts}.")
+        return {"minimax_m3_prefill_loop_trip_count": trip_counts.pop()}
 
     def get_onnx_past_key_value_names(self, layer_idx: int, layer_state=None) -> List[str]:
         return [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
