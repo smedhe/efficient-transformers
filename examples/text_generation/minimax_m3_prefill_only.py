@@ -316,6 +316,7 @@ def main():
         args.model_id,
         config=config,
         kv_offload=True,
+        weight_free=True,
         dtype=torch.float16,
     )
     print(f"[timing] model load: {time.perf_counter() - load_start:.2f}s")

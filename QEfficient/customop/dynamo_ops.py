@@ -33,6 +33,7 @@ from QEfficient.customop.ctx_scatter_gather_cb import (  # noqa: E402
 )
 from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
 from QEfficient.customop.rms_norm import CustomRMSNorm  # noqa: E402
+from QEfficient.customop.sequence_chunk import CompileLengthSequenceChunk
 
 
 @torch.library.custom_op("qefficient::rms_norm", mutates_args=())
@@ -47,6 +48,34 @@ def rms_norm_op(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: floa
 def _(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
     """Fake implementation for torch.export - just returns tensor with same shape/dtype"""
     return torch.empty_like(hidden_states)
+
+
+@torch.library.custom_op("qefficient::compile_length_sequence_chunk", mutates_args=())
+def compile_length_sequence_chunk_op(
+    tensor: torch.Tensor,
+    dim: int,
+    num_chunks: int,
+    chunk_idx: int,
+    compile_axis_size: int,
+) -> torch.Tensor:
+    del compile_axis_size
+    return torch.chunk(tensor, num_chunks, dim=dim)[chunk_idx].clone()
+
+
+@compile_length_sequence_chunk_op.register_fake
+def _(
+    tensor: torch.Tensor,
+    dim: int,
+    num_chunks: int,
+    chunk_idx: int,
+    compile_axis_size: int,
+) -> torch.Tensor:
+    normalized_dim = dim if dim >= 0 else tensor.dim() + dim
+    start = compile_axis_size * chunk_idx // num_chunks
+    end = compile_axis_size * (chunk_idx + 1) // num_chunks
+    output_shape = list(tensor.shape)
+    output_shape[normalized_dim] = end - start
+    return torch.empty(output_shape, dtype=tensor.dtype, device=tensor.device)
 
 
 @torch.library.custom_op("qefficient::ctx_scatter", mutates_args=())
@@ -565,6 +594,7 @@ def _(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
 
 DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.rms_norm.default: get_dynamo_onnxscript_func(CustomRMSNorm),
+    torch.ops.qefficient.compile_length_sequence_chunk.default: get_dynamo_onnxscript_func(CompileLengthSequenceChunk),
     torch.ops.qefficient.ctx_scatter.default: get_dynamo_onnxscript_func(CtxScatter),
     torch.ops.qefficient.ctx_scatter_paged_attention.default: get_dynamo_onnxscript_func(CtxScatterPagedAttention),
     torch.ops.qefficient.ctx_scatter_3d.default: get_dynamo_onnxscript_func(CtxScatter3D),
