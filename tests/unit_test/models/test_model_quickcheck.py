@@ -1511,6 +1511,67 @@ def test_minimax_m3_index_query_projection_uses_configured_loop_count():
 
 
 @pytest.mark.llm_model
+def test_minimax_m3_prefill_attention_exports_query_chunks_as_while_loop():
+    config = _tiny_minimax_m3_text_config()
+
+    class PrefillAttentionModule(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attention = QEffMiniMaxM3VLAttention(config, layer_idx=1).eval()
+            self.blocking_config = SimpleNamespace(
+                num_cores_per_device=4,
+                msa_q_chunk=2,
+                msa_num_kv_blocks=1,
+                num_kv_blocks=1,
+                ctx_len=8,
+                prefill_export_seq_len=8,
+                prefill_compile_seq_len=None,
+                msa_attn_dp=1,
+                msa_attn_cp=1,
+            )
+
+        def forward(self, query, hidden, cos, sin, key, value, block_indices, block_valid, positions):
+            return self.attention._msa_attention_prefill(
+                query,
+                hidden,
+                cos,
+                sin,
+                key,
+                value,
+                block_indices,
+                block_valid,
+                positions,
+                self.blocking_config,
+            )
+
+    batch, sequence_length = 1, 8
+    inputs = (
+        torch.randn(batch, config.num_attention_heads, sequence_length, config.head_dim),
+        torch.randn(batch, sequence_length, config.hidden_size),
+        torch.ones(batch, sequence_length, config.head_dim),
+        torch.zeros(batch, sequence_length, config.head_dim),
+        torch.zeros(batch, config.num_key_value_heads, sequence_length, config.head_dim),
+        torch.zeros(batch, config.num_key_value_heads, sequence_length, config.head_dim),
+        torch.zeros(batch, config.num_key_value_heads, sequence_length, 2, dtype=torch.int32),
+        torch.ones(batch, config.num_key_value_heads, sequence_length, 2, dtype=torch.bool),
+        torch.arange(sequence_length).view(1, sequence_length),
+    )
+    module = PrefillAttentionModule()
+
+    with torch.no_grad():
+        expected = module(*inputs)
+        exported = torch.export.export(module, inputs)
+        actual = exported.module()(*inputs)
+
+    while_loops = [
+        node for node in exported.graph_module.graph.nodes if node.target == torch.ops.higher_order.while_loop
+    ]
+    assert len(while_loops) == 1
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor)
+
+
+@pytest.mark.llm_model
 def test_minimax_m3_reduced_export_runs_at_full_prefill_length(tmp_path):
     vlm_config = _tiny_minimax_m3_vlm_config()
     vlm_config.text_config.max_position_embeddings = 128

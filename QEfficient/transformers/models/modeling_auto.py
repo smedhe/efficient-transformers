@@ -1341,6 +1341,11 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         super().__init__(model, **kwargs)
         self.model = model.get_qeff_language_decoder()
         self.qaic_config = qaic_config
+        get_onnx_transforms = getattr(self.model, "get_onnx_transforms", None)
+        if callable(get_onnx_transforms):
+            for transform in get_onnx_transforms():
+                if transform not in self._onnx_transforms:
+                    self._onnx_transforms.append(transform)
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
         self.continuous_batching = False
         if qaic_config and (mla_absorption := qaic_config.get("mla_absorption", None)):
@@ -1415,6 +1420,21 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
             self.__update_prefill_transform(False, retain_full_kv=kwargs.get("retain_full_kv", False))
 
         qaic_config = kwargs.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        onnx_transform_kwargs = dict(kwargs.pop("onnx_transform_kwargs", None) or {})
+        get_onnx_transform_kwargs = getattr(self.model, "get_onnx_transform_kwargs", None)
+        if callable(get_onnx_transform_kwargs):
+            model_transform_kwargs = get_onnx_transform_kwargs(inputs=inputs, prefill_only=prefill_only)
+            conflicting_keys = {
+                key
+                for key, value in model_transform_kwargs.items()
+                if key in onnx_transform_kwargs and onnx_transform_kwargs[key] != value
+            }
+            if conflicting_keys:
+                raise ValueError(
+                    "Model ONNX transform arguments conflict with caller-provided values for "
+                    f"{sorted(conflicting_keys)}."
+                )
+            onnx_transform_kwargs.update(model_transform_kwargs)
 
         if QEfficient.base.modeling_qeff.QEFFBaseModel._layerwise_active:
             return self._export_layerwise(
@@ -1431,6 +1451,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 num_cores=kwargs.get("num_cores", constants.DEFAULT_AIC_NUM_CORES),
                 qaic_config=qaic_config,
                 prefill_seq_len=prefill_seq_len,
+                onnx_transform_kwargs=onnx_transform_kwargs,
             )
         else:
             dynamo = kwargs.get("dynamo", False) or self._weight_free
@@ -1442,6 +1463,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 offload_pt_weights=offload_pt_weights,
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
                 dynamo=dynamo,
+                onnx_transform_kwargs=onnx_transform_kwargs,
             )
 
     def compile(
