@@ -122,6 +122,7 @@ def main() -> None:
         config=config,
         kv_offload=True,
         dtype=torch.float16,
+        weight_free=True,
         **({"enable_proxy": True} if args.enable_proxy else {}),
     )
     qaic_config = {

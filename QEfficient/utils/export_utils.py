@@ -63,7 +63,9 @@ def reorder_inputs_by_signature(model, example_inputs, dynamic_shapes=None):
     """Reorder example_inputs (and optional dynamic_shapes) to match model.forward signature.
 
     torch.export requires inputs and dynamic_shapes to follow the forward parameter order
-    so that each shape constraint binds to the correct input tensor.
+    so that each shape constraint binds to the correct input tensor. Non-input
+    dynamic_shapes entries are dropped because torch.export only accepts entries
+    matching real forward inputs.
     """
     sig_keys = list(inspect.signature(model.forward).parameters.keys())
     sig_key_set = set(sig_keys)
@@ -75,7 +77,7 @@ def reorder_inputs_by_signature(model, example_inputs, dynamic_shapes=None):
             ordered_shapes[k] = dynamic_shapes[k]
     reordered_inputs = {**ordered_inputs, **{k: v for k, v in example_inputs.items() if k not in sig_key_set}}
     if dynamic_shapes is not None:
-        reordered_shapes = {**ordered_shapes, **{k: v for k, v in dynamic_shapes.items() if k not in sig_key_set}}
+        reordered_shapes = {k: dynamic_shapes.get(k, {}) for k in reordered_inputs}
         return reordered_inputs, reordered_shapes
     return reordered_inputs, None
 
@@ -90,7 +92,7 @@ def build_dynamo_export_kwargs(export_kwargs):
     from QEfficient.utils import constants
 
     kwargs = dict(export_kwargs)
-    kwargs.setdefault("report", False)
+    kwargs.setdefault("report", True)
     kwargs.setdefault("optimize", False)
     kwargs["dynamo"] = True
     kwargs["opset_version"] = constants.ONNX_DYNAMO_EXPORT_OPSET
@@ -137,25 +139,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
 
     def resolve_dim(dim_name: str):
         if dim_name not in dim_registry:
-            if dim_name == "batch_size":
-                dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
-            elif dim_name == "full_batch_size":
-                # CB pool capacity; different min prevents torch.export collapsing it with batch_size.
-                dim_registry[dim_name] = Dim("full_batch_size", min=batch_min + 1, max=DYNAMO_DIM_MAX_BATCH_SIZE)
-            elif "seq_len" in dim_name:
-                dim_registry[dim_name] = Dim("seq_len", min=2, max=max_seq_len)
-            elif "comp_ctx_lengths" in dim_name:
-                dim_registry[dim_name] = Dim("comp_ctx_lengths", min=DYNAMO_DIM_MIN_COMP_CTX_LENGTHS, max=max_seq_len)
-            elif "ctx_len" in dim_name:
-                dim_registry[dim_name] = Dim("ctx_len", min=2, max=max_seq_len)
-            elif "sliding_window" in dim_name:
-                dim_registry[dim_name] = Dim(
-                    "sliding_window",
-                    min=2,
-                    max=getattr(model_config, "sliding_window", max_seq_len),
-                )
-            else:
-                dim_registry[dim_name] = Dim.DYNAMIC
+            dim_registry[dim_name] = Dim(dim_name)
         return dim_registry[dim_name]
 
     dynamic_shapes: Dict[str, Any] = {}
