@@ -15,7 +15,6 @@ import torch
 import torch.nn.functional as F
 import yaml
 from torch import nn
-from torch.onnx.symbolic_helper import parse_args
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
@@ -38,6 +37,7 @@ from QEfficient.blocking.attention_blocking import (
     generic_blocked_attention_interface,
 )
 from QEfficient.customop.utils import (
+    compile_length_sequence_chunk,
     ctx_gather_3d,
     ctx_gather_block_range_kv_dp,
     ctx_gather_blocked_kv,
@@ -80,31 +80,6 @@ _MINIMAX_NPI_OUTPUT_SUFFIXES = (
 )
 
 
-class _CompileLengthSequenceChunk(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        tensor: torch.Tensor,
-        dim: int,
-        num_chunks: int,
-        chunk_idx: int,
-        compile_axis_size: int,
-    ) -> torch.Tensor:
-        del compile_axis_size
-        return torch.chunk(tensor, num_chunks, dim=dim)[chunk_idx]
-
-    @staticmethod
-    @parse_args("v", "i", "i", "i", "i")
-    def symbolic(g, tensor, dim: int, num_chunks: int, chunk_idx: int, compile_axis_size: int):
-        start = compile_axis_size * chunk_idx // num_chunks
-        end = compile_axis_size * (chunk_idx + 1) // num_chunks
-        starts = g.op("Constant", value_t=torch.tensor([start], dtype=torch.long))
-        ends = g.op("Constant", value_t=torch.tensor([end], dtype=torch.long))
-        axes = g.op("Constant", value_t=torch.tensor([dim], dtype=torch.long))
-        steps = g.op("Constant", value_t=torch.tensor([1], dtype=torch.long))
-        return g.op("Slice", tensor, starts, ends, axes, steps)
-
-
 def _dynamic_sequence_chunks(
     tensor: torch.Tensor,
     num_chunks: int,
@@ -114,7 +89,7 @@ def _dynamic_sequence_chunks(
     """Split an evenly divisible dynamic axis without exporting SplitToSequence."""
     if compile_axis_size is not None:
         return tuple(
-            _CompileLengthSequenceChunk.apply(tensor, dim, num_chunks, chunk_idx, compile_axis_size)
+            compile_length_sequence_chunk(tensor, dim, num_chunks, chunk_idx, compile_axis_size)
             for chunk_idx in range(num_chunks)
         )
     shape = tensor.shape
@@ -210,7 +185,7 @@ def qeff_apply_rotary_pos_emb(
 
 def _scalar_like(reference: torch.Tensor, value: int | float) -> torch.Tensor:
     """Create a scalar constant without materializing ``reference.shape``."""
-    return torch.tensor(value, dtype=reference.dtype, device=reference.device)
+    return reference.new_full((), value)
 
 
 class QEffMiniMaxM3VLRotaryEmbedding(MiniMaxM3VLRotaryEmbedding):
@@ -1979,7 +1954,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             for block_idx in range(num_kv_blocks):
                 start = block_idx * kv_block_size
                 end = start + kv_block_size
-                block_skip_future_chunk = torch.tensor(start, device=hidden_states.device) > q_chunk_position
+                block_skip_future_chunk = torch.full_like(q_chunk_position, start, device=hidden_states.device) > q_chunk_position
                 if blocking_config.skip_kv and not is_export and bool(block_skip_future_chunk.all().item()):
                     # The remaining context blocks are entirely in the
                     # future for every query in this Q chunk.  Selection
@@ -4176,9 +4151,9 @@ class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalG
             layer_batch_axis = past_batch_axis if is_sparse_layer else standard_past_batch_axis
             layer_ctx_axis = past_ctx_axis if is_sparse_layer else "ctx_len"
             layer_cache_axes = (
-                {0: layer_batch_axis, 1: layer_ctx_axis}
+                {0: layer_batch_axis,}
                 if is_sparse_layer and use_row_folded_main_kv
-                else {0: layer_batch_axis, 2: layer_ctx_axis}
+                else {0: layer_batch_axis,}
             )
             _set_retained_state_axes(f"past_key.{i}", layer_cache_axes)
             _set_retained_state_axes(f"past_value.{i}", layer_cache_axes)

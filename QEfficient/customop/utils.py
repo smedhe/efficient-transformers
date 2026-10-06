@@ -13,6 +13,21 @@ def select_interface(eager_impl, custom_op_impl):
     return custom_op_impl if use_custom_op else eager_impl
 
 
+def compile_length_sequence_chunk(
+    tensor: torch.Tensor,
+    dim: int,
+    num_chunks: int,
+    chunk_idx: int,
+    compile_axis_size: int,
+) -> torch.Tensor:
+    from QEfficient.customop.sequence_chunk import CompileLengthSequenceChunkFunc
+
+    return select_interface(
+        CompileLengthSequenceChunkFunc.apply,
+        torch.ops.qefficient.compile_length_sequence_chunk,
+    )(tensor, dim, num_chunks, chunk_idx, compile_axis_size)
+
+
 # ---------------------------------------------------------------------------
 # Interface functions for ctx_scatter_gather ops
 # ---------------------------------------------------------------------------

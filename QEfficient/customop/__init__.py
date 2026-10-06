@@ -37,7 +37,9 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
 # uses select_interface, which evaluates torch.ops.qefficient.<op> eagerly.
 from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE  # noqa: F401
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, GemmaCustomRMSNormAIC
+from QEfficient.customop.sequence_chunk import CompileLengthSequenceChunkFunc
 from QEfficient.customop.utils import (
+    compile_length_sequence_chunk,
     ctx_chunk_scatter_batch,
     ctx_gather,
     ctx_gather_3d,
@@ -67,6 +69,7 @@ __all__ = [
     "CtxGatherFuncBlockedKVBatch",
     "CustomRMSNormAIC",
     "GemmaCustomRMSNormAIC",
+    "CompileLengthSequenceChunkFunc",
     # Func classes (for ONNX export symbolic registration and direct use)
     "CtxScatterFunc",
     "CtxScatterFuncPagedAttention",
@@ -90,6 +93,7 @@ __all__ = [
     "CtxGatherFuncPagedKVDP",
     "CtxGatherFuncBlockRangeKVDP",
     # Interface functions (dynamo-aware, prefer these at call sites)
+    "compile_length_sequence_chunk",
     "ctx_scatter",
     "ctx_scatter_paged_attention",
     "ctx_scatter_3d",

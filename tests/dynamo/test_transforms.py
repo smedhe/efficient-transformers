@@ -114,6 +114,33 @@ def test_minimax_ctx_scatter_gather_ops_have_fake_kernels_and_translations():
         assert output.device.type == "meta"
 
 
+def test_minimax_sequence_chunk_is_safe_inside_nested_compile_region():
+    from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import _dynamic_sequence_chunks
+
+    op = torch.ops.qefficient.compile_length_sequence_chunk.default
+    fake_result = op(torch.empty((2, 3, 16), dtype=torch.bool, device="meta"), -1, 4, 2, 16)
+
+    assert fake_result.shape == (2, 3, 4)
+    assert fake_result.dtype == torch.bool
+    assert op in DYNAMO_CUSTOM_OP_TABLE
+
+    class ChunkModule(torch.nn.Module):
+        @torch.compiler.nested_compile_region
+        def forward(self, tensor):
+            return _dynamic_sequence_chunks(tensor, num_chunks=4, dim=1, compile_axis_size=16)[1]
+
+    source = torch.arange(128).view(1, 16, 8)
+    sequence_length = torch.export.Dim("sequence_length", min=4, max=16)
+    exported = torch.export.export(
+        ChunkModule(),
+        (source,),
+        dynamic_shapes={"args": ({1: sequence_length},)},
+    )
+    result = exported.module()(source)
+
+    assert torch.equal(result, source[:, 4:8])
+
+
 def test_preserve_subfunction_source_lines_interprets_graph_modules(monkeypatch):
     invoke_subgraph = importlib.import_module("torch._higher_order_ops.invoke_subgraph")
     original_reenter_make_fx = invoke_subgraph.reenter_make_fx
