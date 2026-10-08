@@ -338,7 +338,7 @@ def main():
         num_cores=args.num_cores,
         num_devices=args.num_devices,
         mxfp6_matmul=True,
-        mxint8_kv_cache=True,
+        mxint8_kv_cache=False,
         use_onnx_subfunctions=args.use_onnx_subfunctions,
         skip_vision=True,
         offload_pt_weights=False,

@@ -173,20 +173,6 @@ def test_preserve_subfunction_source_lines_interprets_graph_modules(monkeypatch)
     assert original_reenter_make_fx is not invoke_subgraph.reenter_make_fx
 
 
-def make_tiny_llama():
-    cfg = LlamaConfig(
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        hidden_size=64,
-        intermediate_size=128,
-        vocab_size=500,
-        max_position_embeddings=32,
-    )
-    model = LlamaForCausalLM(cfg).eval()
-    return model, cfg
-
-
 def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_count_per_fn: int = 2):
     """
     Build a minimal ONNX ModelProto that mimics dynamo's repeated-subgraph output:

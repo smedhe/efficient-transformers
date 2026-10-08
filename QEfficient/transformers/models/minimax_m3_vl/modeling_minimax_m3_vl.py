@@ -65,6 +65,7 @@ from QEfficient.transformers.moe import (
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 
 MASKED_ATTENTION_LOGIT = -3.0e4
 _FP16_MAX_VALUE = 65504.0
@@ -79,6 +80,10 @@ _MINIMAX_NPI_OUTPUT_SUFFIXES = (
     "/self_attn/k_norm/CustomRMSNorm_output_0",
     "/norm/CustomRMSNorm_output_0",
 )
+
+
+def _minimax_m3_vl_decoder_layer_reuse_hash(layer, *args, **kwargs):
+    return 1 if isinstance(layer.mlp, MiniMaxM3VLSparseMoeBlock) else 0
 
 
 def _dynamic_sequence_chunks(
@@ -3502,6 +3507,7 @@ class QEffMiniMaxM3VLSparseMoeBlock(QEffMoEBlockMixin, MiniMaxM3VLSparseMoeBlock
 
 
 class QEffMiniMaxM3VLDecoderLayer(MiniMaxM3VLDecoderLayer):
+    @qeff_nested_compile_region(reuse_hash_fn=_minimax_m3_vl_decoder_layer_reuse_hash)
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -4258,8 +4264,10 @@ class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalG
             layer_batch_axis = past_batch_axis if is_sparse_layer else standard_past_batch_axis
             layer_ctx_axis = past_ctx_axis if is_sparse_layer else "ctx_len"
             layer_cache_axes = (
+                # {0: layer_batch_axis, 1: layer_ctx_axis}
                 {0: layer_batch_axis,}
                 if is_sparse_layer and use_row_folded_main_kv
+                # else {0: layer_batch_axis, 2: layer_ctx_axis}
                 else {0: layer_batch_axis,}
             )
             _set_retained_state_axes(f"past_key.{i}", layer_cache_axes)
