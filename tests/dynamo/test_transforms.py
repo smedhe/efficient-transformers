@@ -339,6 +339,84 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert len(fn.output) == 1, f"Function with 1 scatter should not have outputs added, got {list(fn.output)}"
         assert not model.graph.node[0].output
 
+    def test_wires_index_key_retained_state_once(self):
+        fn = helper.make_function(
+            domain="",
+            fname="repeated_subgraph3",
+            inputs=["past_key.3", "past_value.3", "index_key.3", "hidden_3", "position_ids"],
+            outputs=[],
+            nodes=[
+                helper.make_node(
+                    "CtxScatter",
+                    inputs=["past_key.3", "new_key_3", "position_ids"],
+                    outputs=["scatter_key_3"],
+                    domain="qti.aisw",
+                ),
+                helper.make_node(
+                    "CtxScatter",
+                    inputs=["past_value.3", "new_value_3", "position_ids"],
+                    outputs=["scatter_value_3"],
+                    domain="qti.aisw",
+                ),
+                helper.make_node(
+                    "M3CtxScatter",
+                    inputs=["index_key.3", "position_ids", "new_index_key_3"],
+                    outputs=["scatter_index_key_3"],
+                    domain="qti.aisw",
+                ),
+            ],
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("qti.aisw", 1)],
+        )
+        call_node = helper.make_node(
+            "repeated_subgraph3",
+            inputs=["past_key.3", "past_value.3", "index_key.3_RetainedState", "hidden_3", "position_ids"],
+            outputs=[],
+            domain="",
+        )
+        graph = helper.make_graph(
+            [call_node],
+            "test_graph",
+            [
+                helper.make_tensor_value_info("past_key.3", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("past_value.3", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("index_key.3_RetainedState", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("hidden_3", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("position_ids", TensorProto.INT64, None),
+            ],
+            [
+                helper.make_tensor_value_info("past_key.3_RetainedState", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("past_value.3_RetainedState", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("index_key.3_RetainedState", TensorProto.FLOAT, None),
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(fn)
+
+        changed = PreserveNestedCacheRetainedStateTransform.apply(model)
+        changed_again = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert changed
+        assert not changed_again
+        assert list(model.functions[0].output) == ["scatter_key_3", "scatter_value_3", "scatter_index_key_3"]
+        assert list(model.graph.node[0].input) == [
+            "past_key.3",
+            "past_value.3",
+            "index_key.3",
+            "hidden_3",
+            "position_ids",
+        ]
+        assert list(model.graph.node[0].output) == [
+            "past_key.3_RetainedState",
+            "past_value.3_RetainedState",
+            "index_key.3_RetainedState",
+        ]
+        assert list(model.graph.node[0].output).count("index_key.3_RetainedState") == 1
+        graph_input_names = [value.name for value in model.graph.input]
+        graph_output_names = [value.name for value in model.graph.output]
+        assert "index_key.3" in graph_input_names
+        assert "index_key.3_RetainedState" not in graph_input_names
+        assert "index_key.3_RetainedState" in graph_output_names
+
 
 # ---------------------------------------------------------------------------
 # TestRenameRepeatedSubgraphTransform

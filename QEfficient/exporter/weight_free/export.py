@@ -260,6 +260,7 @@ def export_weight_free_onnx(
 
     meta_qeff_model.model.requires_grad_(False)
     with dynamo_invoke_subgraph_fallback_env(), preserve_subfunction_source_lines():
+        prep_start = time.perf_counter()
         onnx_program = torch.onnx.export(
             meta_qeff_model.model,
             args=(),
@@ -270,6 +271,11 @@ def export_weight_free_onnx(
             dynamic_axes=None,
             dynamic_shapes=dynamic_shapes,
             **export_kwargs,
+        )
+        prep_duration_seconds = time.perf_counter() - prep_start
+        print(
+            "ONNX export completed in %.2fs",
+            prep_duration_seconds,
         )
     if onnx_program is None:
         raise RuntimeError("torch.onnx.export returned None for weight-free dynamo export")
