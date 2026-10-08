@@ -49,10 +49,10 @@ from QEfficient.transformers.moe import (
     gptoss_clamped_glu_mlp,
 )
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("MODEL")
-
 
 def override_gptoss_prefill_chunking(
     config, prefill_only: Optional[bool], enable_chunking: Optional[bool]
@@ -871,6 +871,7 @@ class QEffGptOssAttention(GptOssAttention):
 
 
 class QEffGptOssDecoderLayer(GptOssDecoderLayer):
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,

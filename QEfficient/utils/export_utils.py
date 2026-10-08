@@ -10,7 +10,7 @@ import inspect
 import re
 import warnings
 from collections import Counter
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict
@@ -41,6 +41,8 @@ from QEfficient.utils.logging_utils import QEFFLogger, log_api_arguments
 from QEfficient.utils.runtime_requirements import validate_dynamo_export_requirements
 from QEfficient.utils.torch_patches import (
     apply_torch_patches,
+    invoke_subgraph_export_patches,
+    temporarily_disable_nested_compile_regions,
     temporarily_enable_nested_compile_regions,
     undo_torch_patches,
 )
@@ -380,7 +382,7 @@ def export_wrapper(func):
         cache_probe = kwargs.pop("_layerwise_cache_probe", False)
 
         # Default context managers and state trackers
-        export_context = nullcontext()
+        target_classes = None
         subfunction_state = None
 
         # 1. Setup the requested export mode
@@ -388,9 +390,7 @@ def export_wrapper(func):
             # Handles both Path 4 (dynamo + subfunctions) and Path 2 (TorchScript + subfunctions).
             args, kwargs, subfunction_state = _setup_onnx_subfunctions(self, args, kwargs, dynamo=dynamo)
             if dynamo:
-                # Wrap only decoder layers (not top-level model) — wrapping top-level breaks dynamic_shapes validation.
                 target_classes = subfunction_state.get("decoder_layer_classes") or None
-                export_context = temporarily_enable_nested_compile_regions(self.model, target_classes=target_classes)
 
         # 2. Prepare export directory
         export_dir = _prepare_export_directory(self, kwargs)
@@ -424,7 +424,16 @@ def export_wrapper(func):
             # otherwise identical layer bodies compare as reusable subgraphs.
             grad_context = torch.no_grad() if use_onnx_subfunctions and dynamo else nullcontext()
             try:
-                with export_context, dynamo_patch, grad_context:
+                with ExitStack() as export_context:
+                    if dynamo and use_onnx_subfunctions:
+                        export_context.enter_context(invoke_subgraph_export_patches())
+                        export_context.enter_context(
+                            temporarily_enable_nested_compile_regions(self.model, target_classes=target_classes)
+                        )
+                    elif dynamo:
+                        export_context.enter_context(temporarily_disable_nested_compile_regions(self.model))
+                    export_context.enter_context(dynamo_patch)
+                    export_context.enter_context(grad_context)
                     onnx_path = func(self, *args, **kwargs)
             except Exception as export_exc:
                 QEFFLogger.log_api_failure("export", self.__class__.__name__, export_exc)
