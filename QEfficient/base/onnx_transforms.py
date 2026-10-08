@@ -301,9 +301,10 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
     Renaming them first would break that lookup.
     """
 
-    # Match past_key.N / past_value.N regardless of any suffix that follows
+    # Match past_key.N / past_value.N / index_key.N regardless of any suffix that follows
     # (plain, _RetainedState, or _<prefix>_RetainedState for kv_cache_prefix).
     _KV_INPUT_RE = re.compile(r"^past_(key|value)\.(\d+)")
+    _INDEX_KEY_INPUT_RE = re.compile(r"^index_key\.(\d+)")
 
     # All scatter op_type names that write back a KV cache tensor.
     # Keep in sync with CustomOpTransform._custom_ops and the dynamo
@@ -318,6 +319,27 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             "CtxScatterCB3D",
         }
     )
+
+    @classmethod
+    def _resolve_scatter_output(cls, fn, cache_name: str, function_input: str) -> str:
+        writers = [
+            fn_node
+            for fn_node in fn.node
+            if fn_node.op_type in cls._SCATTER_OP_TYPES
+            and fn_node.input
+            and fn_node.input[0] == function_input
+            and fn_node.output
+        ]
+        if len(writers) != 1:
+            writer_names = [
+                f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
+            ]
+            raise ValueError(
+                f"Could not uniquely resolve the nested {cache_name} cache writer in function "
+                f"'{fn.name}': expected one CtxScatter* with data input '{function_input}', "
+                f"found {len(writers)} ({writer_names})."
+            )
+        return writers[0].output[0]
 
     @classmethod
     def _resolve_kv_scatter_outputs(cls, fn, node, layer_idx: str) -> dict[str, str] | None:
@@ -345,28 +367,25 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         if set(function_cache_inputs) != {"key", "value"}:
             return None
 
-        scatter_outputs = {}
-        for kind, function_input in function_cache_inputs.items():
-            writers = [
-                fn_node
-                for fn_node in fn.node
-                if fn_node.op_type in cls._SCATTER_OP_TYPES
-                and fn_node.input
-                and fn_node.input[0] == function_input
-                and fn_node.output
-            ]
-            if len(writers) != 1:
-                writer_names = [
-                    f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
-                ]
-                raise ValueError(
-                    f"Could not uniquely resolve the nested past_{kind}.{layer_idx} cache writer in function "
-                    f"'{fn.name}': expected one CtxScatter* with data input '{function_input}', "
-                    f"found {len(writers)} ({writer_names})."
-                )
-            scatter_outputs[kind] = writers[0].output[0]
+        return {
+            kind: cls._resolve_scatter_output(fn, f"past_{kind}.{layer_idx}", function_input)
+            for kind, function_input in function_cache_inputs.items()
+        }
 
-        return scatter_outputs
+    @classmethod
+    def _resolve_index_key_scatter_output(cls, fn, node, layer_idx: str) -> tuple[str, str] | None:
+        for input_index, input_name in enumerate(node.input):
+            match = cls._INDEX_KEY_INPUT_RE.match(input_name)
+            if match is None or match.group(1) != layer_idx:
+                continue
+            if input_index >= len(fn.input):
+                raise ValueError(
+                    f"Nested function '{fn.name}' has no input at position {input_index} for "
+                    f"call-node cache input '{input_name}'."
+                )
+            scatter_output = cls._resolve_scatter_output(fn, f"index_key.{layer_idx}", fn.input[input_index])
+            return scatter_output, input_name
+        return None
 
     @classmethod
     def apply(cls, model: ModelProto) -> bool:
@@ -404,42 +423,61 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             if layer_idx is None or set(kv_inputs) != {"key", "value"}:
                 continue
 
-            desired_outputs = [
+            desired_kv_outputs = [
                 f"past_key.{layer_idx}_RetainedState",
                 f"past_value.{layer_idx}_RetainedState",
             ]
+            desired_index_output = f"index_key.{layer_idx}_RetainedState"
+            needs_kv_rewire = any(name in dangling_retained_outputs for name in desired_kv_outputs)
+            needs_index_rewire = desired_index_output in dangling_retained_outputs
+
             # Skip layers whose retained-state outputs are not dangling —
             # either the graph is already correctly wired or a previous call
             # to this transform already fixed them.
-            if not any(name in dangling_retained_outputs for name in desired_outputs):
+            if not needs_kv_rewire and not needs_index_rewire:
                 continue
 
-            if not all(name in dangling_retained_outputs for name in desired_outputs):
+            if needs_kv_rewire and not all(name in dangling_retained_outputs for name in desired_kv_outputs):
                 raise ValueError(
                     f"Nested function '{fn.name}' has partially dangling KV retained-state outputs for layer "
-                    f"{layer_idx}: expected both {desired_outputs}."
+                    f"{layer_idx}: expected both {desired_kv_outputs}."
                 )
 
-            scatter_outputs = cls._resolve_kv_scatter_outputs(fn, node, layer_idx)
-            if scatter_outputs is None:
+            kv_scatter_outputs = cls._resolve_kv_scatter_outputs(fn, node, layer_idx) if needs_kv_rewire else None
+            index_scatter = cls._resolve_index_key_scatter_output(fn, node, layer_idx) if needs_index_rewire else None
+            if needs_kv_rewire and kv_scatter_outputs is None:
+                continue
+            if needs_index_rewire and index_scatter is None:
                 continue
 
             # Expose scatter outputs in the function's output list, rename KV
             # inputs and append retained-state output names to the call node.
-            # Both writers are resolved before this block, so graph rewiring is atomic.
-            for kind, desired_output in zip(("key", "value"), desired_outputs):
-                scatter_output = scatter_outputs[kind]
-                if scatter_output not in fn.output:
-                    fn.output.append(scatter_output)
-                    changed = True
+            # Writers are resolved before this block, so graph rewiring is atomic.
+            if kv_scatter_outputs is not None:
+                for kind, desired_output in zip(("key", "value"), desired_kv_outputs):
+                    scatter_output = kv_scatter_outputs[kind]
+                    if scatter_output not in fn.output:
+                        fn.output.append(scatter_output)
+                        changed = True
 
-                retained_input = kv_inputs[kind]
-                plain_input = f"past_{kind}.{layer_idx}"
+                    retained_input = kv_inputs[kind]
+                    plain_input = f"past_{kind}.{layer_idx}"
+                    if retained_input.endswith("_RetainedState"):
+                        kv_rename_map[retained_input] = plain_input
+
+                    if desired_output not in node.output:
+                        node.output.append(desired_output)
+                        changed = True
+
+            if index_scatter is not None:
+                index_scatter_output, retained_input = index_scatter
                 if retained_input.endswith("_RetainedState"):
-                    kv_rename_map[retained_input] = plain_input
-
-                if desired_output not in node.output:
-                    node.output.append(desired_output)
+                    kv_rename_map[retained_input] = f"index_key.{layer_idx}"
+                if index_scatter_output not in fn.output:
+                    fn.output.append(index_scatter_output)
+                    changed = True
+                if desired_index_output not in node.output:
+                    node.output.append(desired_index_output)
                     changed = True
 
         if kv_rename_map:
