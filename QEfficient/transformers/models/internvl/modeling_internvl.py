@@ -10,12 +10,20 @@ from typing import List, Optional, Type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.models.internvl.modeling_internvl import InternVLVisionLayer
 
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("MODEL")
+
+
+class QEffInternVLVisionLayer(InternVLVisionLayer):
+    @qeff_nested_compile_region
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
 
 
 class QEffInternEncoderWrapper(nn.Module):
@@ -30,7 +38,7 @@ class QEffInternEncoderWrapper(nn.Module):
             This method should return the *class object* (not an instance).
             Downstream code can use this to find/build subfunctions for repeated blocks.
         """
-        return {self.model.vision_model.encoder.layers[0].__class__}
+        return {QEffInternVLVisionLayer}
 
     def forward(self, pixel_values):
         vision_embeds = self.model.extract_feature(pixel_values)

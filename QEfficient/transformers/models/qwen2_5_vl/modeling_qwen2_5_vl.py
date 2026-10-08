@@ -44,6 +44,7 @@ from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.torch_patches import qeff_nested_compile_region
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("MODEL")
@@ -176,6 +177,7 @@ class QEffQwen2_5_VLVisionAttention(Qwen2_5_VLVisionAttention):
 
 
 class QEffQwen2_5_VLVisionBlock(Qwen2_5_VLVisionBlock):
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -522,6 +524,7 @@ class QEffQwen2_5_VLAttention(Qwen2_5_VLAttention):
 
 
 class QEffQwen2_5_VLDecoderLayer(Qwen2_5_VLDecoderLayer):
+    @qeff_nested_compile_region
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -774,7 +777,7 @@ class QEffQwen_2_5_vl_EncoderWrapper(nn.Module):
             This method should return the *class object* (not an instance).
             Downstream code can use this to find/build subfunctions for repeated blocks.
         """
-        return {self.model.visual.blocks[0].__class__}
+        return {QEffQwen2_5_VLVisionBlock}
 
     def forward(self, pixel_values, image_grid_thw):
         image_embeds = self.model.visual(pixel_values, grid_thw=image_grid_thw)
