@@ -455,7 +455,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         offset_in_way = torch.where(
             offset_in_way >= 0, offset_in_way.clamp_max(index_block_size - 1), torch.full_like(offset_in_way, -1)
         )
-        gather_limit = (pos_max_rows // cycle_size) * index_block_size + offset_in_way
+        gather_limit = torch.div(pos_max_rows, cycle_size, rounding_mode="floor") * index_block_size + offset_in_way
         ctx_indices = torch.arange(start_index, end_index, device=index_key_cache.device).view(1, 1, block_len)
         ctx_indices = torch.where(ctx_indices > gather_limit.unsqueeze(-1), torch.zeros_like(ctx_indices), ctx_indices)
         ctx_indices = ctx_indices.to(torch.int32).expand(batch_local, rows, block_len)
@@ -1562,7 +1562,8 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             .expand(batch_local, dp, cp, hkv, query_len, dim)
             .reshape(batch_local, rows, query_len, dim)
         )
-        logical_index_block = position_ids_dp // cfg.index_block_size
+        # logical_index_block = position_ids_dp // cfg.index_block_size
+        logical_index_block = torch.div(position_ids_dp, cfg.index_block_size, rounding_mode="floor")
         live_way = (
             (logical_index_block % cp)[:, :, None, None, :]
             .expand(batch_local, dp, cp, hkv, query_len)
@@ -1577,8 +1578,10 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             .expand(batch_local, rows, query_len)
         )
         block_id = torch.where(row_live, batch_id, torch.iinfo(torch.int32).max).to(torch.int32)
+        # logical_index_block_per_cp = logical_index_block // cp
+        logical_index_block_per_cp = torch.div(logical_index_block, cp, rounding_mode="floor")
         addr = (
-            ((logical_index_block // cp) * cfg.index_block_size + position_ids_dp % cfg.index_block_size)
+            ((logical_index_block_per_cp) * cfg.index_block_size + position_ids_dp % cfg.index_block_size)
             .to(torch.int32)[:, :, None, None, :]
             .expand(batch_local, dp, cp, hkv, query_len)
             .reshape(batch_local, rows, query_len)
@@ -1648,7 +1651,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             device_block_score_groups: list[torch.Tensor] = []
             device_block_id_groups: list[torch.Tensor] = []
             q_block_rows = (
-                (position_ids_dp[batch_start:batch_end, :, 0] // cfg.index_block_size)
+                torch.div(position_ids_dp[batch_start:batch_end, :, 0], cfg.index_block_size, rounding_mode="floor")
                 .view(local, dp, 1, 1)
                 .expand(local, dp, cp, hkv)
                 .reshape(local, rows)
@@ -1787,7 +1790,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         topk_scores, candidate_topk = torch.topk(candidate_scores, k=selected_blocks, dim=-1)
         block_indices = torch.gather(candidate_block_indices, -1, candidate_topk)
         current_block_ids = (
-            (position_ids.view(dp, batch_local, query_len).permute(1, 0, 2) // cfg.index_block_size)
+            torch.div(position_ids.view(dp, batch_local, query_len).permute(1, 0, 2), cfg.index_block_size, rounding_mode="floor")
             .view(batch_local, dp, 1, 1, query_len, 1)
             .expand(
                 batch_local,
@@ -2830,7 +2833,8 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             blocks_per_cp = key_cache.shape[2] // cfg.index_block_size
             block_ids_global = token_indices.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
             valid_global = token_valid.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
-            block_cp = block_ids_global // blocks_per_cp
+            # block_cp = block_ids_global // blocks_per_cp
+            block_cp = torch.div(block_ids_global, blocks_per_cp, rounding_mode="floor")
             block_cp_valid = (block_cp >= 0) & (block_cp < cp)
             gather_block_local = block_ids_global - block_cp * blocks_per_cp
             cp_idx = torch.arange(cp, device=query_states.device).view(1, 1, 1, cp, 1)

@@ -1325,7 +1325,8 @@ class QEffMiniMaxSparseCache(QEffDynamicCache):
                     .reshape(batch_local, rows, query_len, head_dim)
                 )
                 position_ids_dp = position_ids.view(dp, batch_local, query_len).permute(1, 0, 2)
-                owner_cp = position_ids_dp // local_ctx_len
+                # owner_cp = position_ids_dp // local_ctx_len
+                owner_cp = torch.div(position_ids_dp, local_ctx_len, rounding_mode="floor")
                 owner_valid = (owner_cp >= 0) & (owner_cp < cp)
                 local_pos = position_ids_dp - owner_cp * local_ctx_len
                 row_cp = torch.arange(rows, device=layer.keys.device).remainder(hkv * cp).remainder(cp)

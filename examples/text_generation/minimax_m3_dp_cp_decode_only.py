@@ -262,7 +262,7 @@ def main():
         use_onnx_subfunctions=True,
         dynamo=True,
         skip_vision=True,
-        node_precision_info=True,
+        node_precision_info=False,
         offload_pt_weights=False,
         log_times=True,
         qaic_config={

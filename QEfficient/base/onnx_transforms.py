@@ -306,28 +306,64 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
     _KV_INPUT_RE = re.compile(r"^past_(key|value)\.(\d+)")
     _INDEX_KEY_INPUT_RE = re.compile(r"^index_key\.(\d+)")
 
-    # All scatter op_type names that write back a KV cache tensor.
+    # All scatter op_type names that write back a KV cache tensor.  DP/CP
+    # decode uses CtxPagedScatterDP, while batch-folded and paged attention
+    # paths use the other specialized scatter operators below.
     # Keep in sync with CustomOpTransform._custom_ops and the dynamo
     # custom_translation_table in base/modeling_qeff.py.
     _SCATTER_OP_TYPES = frozenset(
         {
+            "CtxChunkScatterBatch",
             "CtxScatter",
+            "CtxScatterPagedAttention",
             "M3CtxScatter",
             "CtxScatterCB",
             "CtxScatter3D",
             "CtxScatter3DInt",
             "CtxScatterCB3D",
+            "CtxPagedScatterDP",
+        }
+    )
+    _CACHE_VIEW_OP_TYPES = frozenset(
+        {
+            "Cast",
+            "CastLike",
+            "Expand",
+            "Flatten",
+            "Identity",
+            "Reshape",
+            "Squeeze",
+            "Transpose",
+            "Unsqueeze",
         }
     )
 
     @classmethod
     def _resolve_scatter_output(cls, fn, cache_name: str, function_input: str) -> str:
+        producers = {
+            output_name: fn_node
+            for fn_node in fn.node
+            for output_name in fn_node.output
+            if output_name
+        }
+
+        def is_cache_view(value_name: str, visited: set[str]) -> bool:
+            if value_name == function_input:
+                return True
+            if value_name in visited:
+                return False
+            visited.add(value_name)
+            producer = producers.get(value_name)
+            if producer is None or producer.op_type not in cls._CACHE_VIEW_OP_TYPES or not producer.input:
+                return False
+            return is_cache_view(producer.input[0], visited)
+
         writers = [
             fn_node
             for fn_node in fn.node
             if fn_node.op_type in cls._SCATTER_OP_TYPES
             and fn_node.input
-            and fn_node.input[0] == function_input
+            and is_cache_view(fn_node.input[0], set())
             and fn_node.output
         ]
         if len(writers) != 1:
@@ -336,7 +372,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             ]
             raise ValueError(
                 f"Could not uniquely resolve the nested {cache_name} cache writer in function "
-                f"'{fn.name}': expected one CtxScatter* with data input '{function_input}', "
+                f"'{fn.name}': expected one scatter writer derived from cache input '{function_input}', "
                 f"found {len(writers)} ({writer_names})."
             )
         return writers[0].output[0]
