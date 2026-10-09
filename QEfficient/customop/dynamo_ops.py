@@ -166,10 +166,12 @@ def ctx_gather_3d_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Ten
 @ctx_gather_3d_op.register_fake
 def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
     """Fake implementation for torch.export"""
-    # Return tensor with shape [batch_size, seq_len]
+    # The real gather preserves all trailing data dimensions.  For the DP
+    # index cache this is [flat_rows, cache_slots, head_dim], so the gathered
+    # result must retain head_dim as [flat_rows, seq_len, head_dim].
     batch_size = data.shape[0]
     seq_len = ctx_indices.shape[1]
-    return torch.empty(batch_size, seq_len, dtype=data.dtype, device=data.device)
+    return torch.empty(batch_size, seq_len, *data.shape[2:], dtype=data.dtype, device=data.device)
 
 
 @torch.library.custom_op("qefficient::ctx_gather", mutates_args=())

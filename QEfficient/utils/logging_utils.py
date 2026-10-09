@@ -380,10 +380,26 @@ class QEFFLogger:
             stacklevel=3,
         )
 
+    @staticmethod
+    def _configure_dynamo_logging() -> None:
+        """Allow logger level checks to pass through Torch Dynamo capture."""
+        try:
+            import torch._dynamo.config as dynamo_config
+        except (ImportError, ModuleNotFoundError):
+            return
+
+        dynamo_config.ignore_logging_functions.update(
+            {
+                logging.Logger.isEnabledFor,
+                logging.LoggerAdapter.isEnabledFor,
+            }
+        )
+
     def _initialize_logger(self) -> logging.Logger:
         """
         Set up the logger with rotating file handler and JSON formatter.
         """
+        self._configure_dynamo_logging()
         QEFFLogger._logfile = self.log_path
 
         logger = logging.getLogger("QEFF_LOGGER")

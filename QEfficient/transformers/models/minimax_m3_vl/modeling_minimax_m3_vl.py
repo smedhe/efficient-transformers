@@ -1690,8 +1690,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                 start, _ = block_ranges[block_idx]
                 block_ids_rows = make_block_ids_rows(start, local)
                 block_skip_future = (
-                    torch.tensor(start * cp, device=hidden_states.device, dtype=q_pos_rows_all.dtype)
-                    > q_pos_rows_all[batch_start:batch_end]
+                   start * cp > q_pos_rows_all[batch_start:batch_end]
                 )
                 if skip_kv and not is_export and bool(block_skip_future.all().item()):
                     masked_block = torch.full(
@@ -1724,7 +1723,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                 epilogue_start, _ = block_ranges[epilogue_idx]
                 epilogue_block_ids = make_block_ids_rows(epilogue_start, local)
                 epilogue_skip_future = (
-                    torch.tensor(epilogue_start * cp, device=hidden_states.device, dtype=q_pos_rows_all.dtype)
+                   epilogue_start * cp
                     > q_pos_rows_all[batch_start:batch_end]
                 )
                 epilogue_scores = compute_block_scores(key_5d)
@@ -2828,7 +2827,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
 
             selected_blocks = token_indices.shape[-1]
             selected_len = selected_blocks * cfg.index_block_size
-            blocks_per_cp = torch._shape_as_tensor(key_cache)[2].to(token_indices.dtype) // cfg.index_block_size
+            blocks_per_cp = key_cache.shape[2] // cfg.index_block_size
             block_ids_global = token_indices.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
             valid_global = token_valid.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
             block_cp = block_ids_global // blocks_per_cp
@@ -3424,8 +3423,8 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     scaling=self.scaling,
                 )
             attn_output = attn_output.reshape(*input_shape, self.config.num_attention_heads * self.head_dim)
-
-        return self.o_proj(attn_output.contiguous()), None
+        attn_op = self.o_proj(attn_output.contiguous())
+        return attn_op, None
 
 
 def _qeff_minimax_clamp(hidden_states: torch.Tensor, min_value=None, max_value=None) -> torch.Tensor:

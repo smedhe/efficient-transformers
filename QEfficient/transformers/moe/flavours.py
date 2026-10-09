@@ -69,7 +69,11 @@ def supports_moe_flavour(module, flavour: Union[MoEFlavour, str]) -> bool:
 
 def reduce_nsp_tree(values: torch.Tensor, num_lanes: int) -> torch.Tensor:
     """Reduce lane outputs with the tree pattern used by Qwen3-VL-MoE expert parallelism."""
-    logger.warning(f"Reducing {values.shape} across {num_lanes} lanes using tree reduction")
+    # LoggerAdapter.isEnabledFor is not capturable inside an invoke_subgraph.
+    # Keep this diagnostic for eager execution while excluding it from Dynamo
+    # and ONNX graph capture.
+    if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
+        logger.warning(f"Reducing {values.shape} across {num_lanes} lanes using tree reduction")
     current = values
     width = num_lanes
     while width > 1:
